@@ -1,0 +1,16 @@
+// Имена здесь должны совпадать с суффиксами @system.*: импорт
+// "@system.storage" загрузчик превращает в `export { storage as default }`.
+export {
+  storage,
+  network,
+  file,
+  request,
+  prompt,
+  record,
+  vibrator,
+  router,
+  audio,
+  media
+} from "./system.mjs";
+
+export { fetchModule as fetch } from "./system.mjs";

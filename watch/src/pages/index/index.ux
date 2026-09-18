@@ -20,7 +20,7 @@
       <text class="hero-result">{{result}}</text>
     </div>
     <text class="error-banner" if="{{errorText}}">{{errorText}}</text>
-    <text class="setup-banner" if="{{showSetup}}">Шлюз ещё не настроен: задайте адрес и токен в config.js перед сборкой</text>
+    <text class="setup-banner" if="{{showSetup}}">Шлюз не настроен: запустите npm run setup и пересоберите приложение</text>
     <text class="transfer-hint" if="{{transferMode}}">запись ушла способом: {{transferMode}}</text>
     <text class="queue-hint" if="{{hasQueued}}">не отправлено: {{queuedCount}}</text>
 

@@ -231,7 +231,13 @@ function uploadByBytes(path, uri, contentType, intent, requestKey, preview, done
       }
       sendAudioBytes(path, bytes, contentType, intent, requestKey, preview, done, fail)
     }),
-    fail: settle(function(error) { handleFail(error, fail) })
+    // Файл не прочитался — это не обрыв связи, а потеря записи: рантайм
+    // вправе чистить кэш приложения. Повторять нечего, поэтому помечаем
+    // gone, иначе отложенная заметка будет вечно стоять первой в очереди
+    // и загораживать всё, что за ней.
+    fail: settle(function() {
+      fail({ message: "Запись не найдена на часах", gone: true })
+    })
   })
 }
 

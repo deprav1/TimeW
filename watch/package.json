@@ -4,6 +4,8 @@
   "private": true,
   "engines": { "node": ">=8.10" },
   "scripts": {
+    "pretest": "node scripts/prepare.mjs",
+    "test": "node --import ./testkit/register.mjs --test",
     "prestart": "node scripts/prepare.mjs",
     "start": "aiot start --watch",
     "prebuild": "node scripts/prepare.mjs --bump",

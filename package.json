@@ -8,7 +8,9 @@
     "setup": "node server/scripts/setup.mjs",
     "start": "node server/src/server.mjs",
     "autostart": "node server/scripts/autostart.mjs",
-    "test": "npm --prefix server test",
+    "test": "npm --prefix server test && npm --prefix watch test",
+    "test:server": "npm --prefix server test",
+    "test:watch": "npm --prefix watch test",
     "smoke": "node server/scripts/smoke.mjs",
     "build": "npm --prefix watch run build"
   }

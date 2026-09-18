@@ -1,0 +1,77 @@
+// Сценарии настроек: что приложение знает о шлюзе после установки,
+// переустановки и смены адреса.
+import test from "node:test";
+import assert from "node:assert/strict";
+import { storage, resetAll } from "../testkit/system.mjs";
+
+const { loadSettings, saveSettings, getCached, rememberTransferMode } = await import("../src/common/settings.js");
+const { GATEWAY_URL, DEVICE_TOKEN, CONFIG_STAMP } = await import("../src/common/config.js");
+
+function load() {
+  return new Promise((resolve) => loadSettings(resolve));
+}
+
+test("на чистых часах настройки берутся из сборки", async () => {
+  resetAll();
+  const settings = await load();
+  assert.equal(settings.gatewayUrl, GATEWAY_URL);
+  assert.equal(settings.deviceToken, DEVICE_TOKEN);
+});
+
+test("выбор человека переживает перезапуск", async () => {
+  resetAll();
+  await load();
+  await new Promise((done, fail) => saveSettings({ speakAnswers: true, aiProvider: "gemini" }, done, fail));
+  const settings = await load();
+  assert.equal(settings.speakAnswers, true);
+  assert.equal(settings.aiProvider, "gemini");
+});
+
+test("новая сборка перекрывает адрес и токен прошлой установки", async () => {
+  resetAll();
+  // Часы после предыдущей установки: адрес старый, метка сборки чужая.
+  storage.data.gatewayUrl = "http://192.168.0.99:8787";
+  storage.data.deviceToken = "старый-токен";
+  storage.data.configStamp = "сборка-которой-больше-нет";
+  storage.data.speakAnswers = "1";
+
+  const settings = await load();
+
+  assert.equal(settings.gatewayUrl, GATEWAY_URL, "иначе установка нового .rpk выглядит как «ничего не изменилось»");
+  assert.equal(settings.deviceToken, DEVICE_TOKEN);
+  assert.equal(settings.configStamp, CONFIG_STAMP);
+  assert.equal(settings.speakAnswers, true, "личный выбор сборка трогать не должна");
+});
+
+test("та же сборка настройки не трогает", async () => {
+  resetAll();
+  storage.data.gatewayUrl = "http://192.168.0.99:8787";
+  storage.data.configStamp = CONFIG_STAMP;
+
+  const settings = await load();
+  assert.equal(settings.gatewayUrl, "http://192.168.0.99:8787");
+});
+
+test("хвостовой слэш в адресе срезается: иначе все пути уезжают в двойной слэш", async () => {
+  resetAll();
+  storage.data.gatewayUrl = "http://gateway.example:8787/";
+  storage.data.configStamp = CONFIG_STAMP;
+  const settings = await load();
+  assert.equal(settings.gatewayUrl, "http://gateway.example:8787");
+});
+
+test("сломанный storage не оставляет экран настроек пустым", async () => {
+  resetAll();
+  storage.failOnGet = true;
+  const settings = await load();
+  assert.equal(settings.gatewayUrl, GATEWAY_URL, "ожидались значения по умолчанию, а не зависание");
+});
+
+test("сработавший способ доставки записи запоминается", async () => {
+  resetAll();
+  await load();
+  rememberTransferMode("upload");
+  assert.equal(getCached().transferMode, "upload");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(storage.data.transferMode, "upload");
+});
