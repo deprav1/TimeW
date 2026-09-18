@@ -1,3 +1,10 @@
 {
-  "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }]
+  "framework": null,
+  "installCommand": "echo зависимости не нужны",
+  "buildCommand": "echo сборка не нужна: здесь только прокси",
+  "outputDirectory": "public",
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/index" },
+    { "source": "/health", "destination": "/api/index" }
+  ]
 }
