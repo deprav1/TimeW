@@ -62,6 +62,14 @@ config.tuyaUid = "";
 // set config.token themselves and restore it to this empty baseline.
 config.token = "";
 
+// И то же самое для озвучки. Если в server/.env включён TTS (а он там
+// включается, как только человек захотел звук), synthesizeSpeech пошла бы
+// к настоящему провайдеру вместо поддельного, и проверки озвучки падали бы
+// только на настроенной машине. Тесты, которым озвучка нужна, задают эти
+// поля сами.
+config.ttsProvider = "none";
+config.ttsApiKey = "";
+
 let base;
 
 // Builds a multipart/form-data body by hand (Buffer-only — never a string
