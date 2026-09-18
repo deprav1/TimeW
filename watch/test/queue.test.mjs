@@ -2,7 +2,7 @@
 // На часах без eSIM это не редкий случай, а обычный режим вне дома.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { storage, resetAll } from "../testkit/system.mjs";
+import { file, storage, resetAll } from "../testkit/system.mjs";
 
 const {
   loadQueue,
@@ -19,12 +19,25 @@ function fresh() {
 
 test("надиктованная без сети заметка сохраняется вместе со звуком", async () => {
   await fresh();
+  file.files["internal://cache/a.opus"] = new ArrayBuffer(64);
   await new Promise((done, fail) => enqueueAudio("internal://cache/a.opus", "audio/opus", done, fail));
   const queued = getQueued();
   assert.equal(queued.length, 1);
   assert.equal(queued[0].kind, "audio");
-  assert.equal(queued[0].uri, "internal://cache/a.opus");
+  assert.match(queued[0].uri, /^internal:\/\/files\/timew\/pending-/);
   assert.ok(queued[0].requestId, "нужен ключ идемпотентности, иначе досылка создаст дубль");
+});
+
+test("офлайн-запись сохраняет ключ уже начатого запроса", async () => {
+  await fresh();
+  await new Promise((done, fail) => enqueueAudio(
+    "internal://cache/a.opus",
+    "audio/opus",
+    done,
+    fail,
+    "voice-request-1"
+  ));
+  assert.equal(getQueued()[0].requestId, "voice-request-1");
 });
 
 test("очередь переживает перезапуск приложения", async () => {
@@ -75,6 +88,23 @@ test("успешная досылка убирает заметку из оче�
   });
   assert.deepEqual(result, { sent: 1, left: 0, dropped: 0 });
   assert.equal(getQueued().length, 0);
+});
+
+test("успешная досылка удаляет постоянную копию аудио", async () => {
+  await fresh();
+  storage.data.pendingNotes = JSON.stringify([{
+    id: "audio-1",
+    kind: "audio",
+    uri: "internal://files/timew/pending-a.opus",
+    contentType: "audio/opus",
+    requestId: "voice-1",
+    createdAt: new Date().toISOString()
+  }]);
+  const { file } = await import("../testkit/system.mjs");
+  file.files["internal://files/timew/pending-a.opus"] = new ArrayBuffer(8);
+  await new Promise((resolve) => loadQueue(resolve));
+  await new Promise((resolve) => flush((item, onOk) => onOk(), resolve));
+  assert.equal(file.files["internal://files/timew/pending-a.opus"], undefined);
 });
 
 test("неудачная досылка сохраняет заметку до следующего раза", async () => {

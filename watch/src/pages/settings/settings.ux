@@ -232,7 +232,7 @@ export default {
         // включённая «Озвучка» просто молчит, и понять почему нельзя.
         var caps = parsed && parsed.capabilities
         if (caps && caps.speech === false) {
-          self.errorText = "Озвучка не настроена на шлюзе (нужен TTS_API_KEY)"
+          self.errorText = "Озвучка не настроена на шлюзе"
         }
       }),
       fail: settle(function(error) {

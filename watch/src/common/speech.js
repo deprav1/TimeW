@@ -30,13 +30,39 @@ function messageForStatus(status) {
   return "Не удалось получить озвучку"
 }
 
+var activeFinish = null
+
 function play(uri, done, fail) {
-  try {
-    audio.src = uri
-    if (typeof audio.play === "function") audio.play()
+  var settled = false
+  function finishOk() {
+    if (settled) return
+    settled = true
+    if (activeFinish === finishOk) activeFinish = null
+    audio.onended = null
+    audio.onstop = null
+    audio.onerror = null
     if (done) done()
+  }
+  function finishError(error) {
+    if (settled) return
+    settled = true
+    if (activeFinish === finishOk) activeFinish = null
+    audio.onended = null
+    audio.onstop = null
+    audio.onerror = null
+    if (fail) fail(error || { message: "Часы не смогли проиграть ответ" })
+  }
+  activeFinish = finishOk
+  try {
+    audio.onended = finishOk
+    // A stop is terminal for the UI too: the user explicitly asked to stop.
+    audio.onstop = finishOk
+    audio.onerror = function() { finishError({ message: "Часы не смогли проиграть ответ" }) }
+    audio.src = uri
+    if (typeof audio.play !== "function") throw new Error("audio.play is unavailable")
+    audio.play()
   } catch (error) {
-    fail({ message: "Часы не смогли проиграть ответ" })
+    finishError({ message: "Часы не смогли проиграть ответ" })
   }
 }
 
@@ -52,7 +78,8 @@ export function speak(speechId, done, fail) {
   var settle = guard(UPLOAD_TIMEOUT_MS, function() {
     fail({ message: "Озвучка не пришла вовремя" })
   })
-  request.download({
+  try {
+    request.download({
     url: baseUrl() + "/api/v1/speak/" + speechId,
     header: downloadHeaders,
     success: settle(function(data) {
@@ -64,25 +91,32 @@ export function speak(speechId, done, fail) {
       var settleComplete = guard(UPLOAD_TIMEOUT_MS, function() {
         fail({ message: "Озвучка не пришла вовремя" })
       })
-      request.onDownloadComplete({
-        token: downloadToken,
-        success: settleComplete(function(result) {
-          var uri = result && (result.uri || result)
-          if (!uri) {
-            fail({ message: "Файл озвучки не найден" })
-            return
-          }
-          play(uri, done, fail)
-        }),
-        fail: settleComplete(function(error, code) {
-          fail({ message: messageForStatus(code) })
+      try {
+        request.onDownloadComplete({
+          token: downloadToken,
+          success: settleComplete(function(result) {
+            var uri = result && (result.uri || result)
+            if (!uri) {
+              fail({ message: "Файл озвучки не найден" })
+              return
+            }
+            play(uri, done, fail)
+          }),
+          fail: settleComplete(function(error, code) {
+            fail({ message: messageForStatus(code) })
+          })
         })
-      })
+      } catch (error) {
+        settleComplete(function() { fail({ message: "Не удалось получить файл озвучки" }) })()
+      }
     }),
     fail: settle(function(error, code) {
       fail({ message: messageForStatus(code) })
     })
-  })
+    })
+  } catch (error) {
+    settle(function() { fail({ message: "Не удалось начать загрузку озвучки" }) })()
+  }
 }
 
 export function stopSpeaking() {
@@ -91,4 +125,5 @@ export function stopSpeaking() {
   } catch (error) {
     // Нечего останавливать — не ошибка.
   }
+  if (activeFinish) activeFinish()
 }

@@ -33,9 +33,9 @@ import vibrator from "@system.vibrator"
 import router from "@system.router"
 import { listNotes, deleteNote, voiceUri, query } from "../../common/api"
 import { recordAudio, stopRecording } from "../../common/audio"
-import { isOnline } from "../../common/net"
 import { getQueued, enqueueAudio, loadQueue } from "../../common/queue"
 import { getCachedNotes, saveCachedNotes, loadCachedNotes } from "../../common/notes-cache"
+import { loadSettings, getCached } from "../../common/settings"
 
 function messageFrom(error) {
   return error && error.message ? error.message : "Не удалось связаться со шлюзом"
@@ -59,16 +59,28 @@ export default {
     dictateClass: "dictate-button",
     dictateLabel: "Надиктовать",
     voiceEpoch: 0,
-    recording: false
+    recording: false,
+    settingsReady: false,
+    lastRefreshAt: 0
   },
 
   onShow() {
     var self = this
-    loadCachedNotes(function(cached) {
-      if (cached) self.show(cached, true)
-      loadQueue(function() {
-        self.queuedCount = getQueued().length
-        self.refresh()
+    loadSettings(function() {
+      self.settingsReady = true
+      loadCachedNotes(function(cached) {
+        if (cached) self.show(cached, true)
+        loadQueue(function() {
+          self.queuedCount = getQueued().length
+          if (!getCached().gatewayUrl || !getCached().deviceToken) {
+            self.errorText = "Сначала настройте шлюз"
+            return
+          }
+          var now = Date.now()
+          if (self.lastRefreshAt && now - self.lastRefreshAt < 30000) return
+          self.lastRefreshAt = now
+          self.refresh()
+        })
       })
     })
   },
@@ -109,6 +121,10 @@ export default {
 
   dictate() {
     var self = this
+    if (!self.settingsReady || !getCached().gatewayUrl || !getCached().deviceToken) {
+      self.errorText = "Сначала настройте шлюз"
+      return
+    }
     // Идёт запись — значит нажатие означает «я договорил»: заканчиваем и
     // отправляем, а не отменяем.
     if (self.recording) {
@@ -167,7 +183,7 @@ export default {
       self.errorText = "Нет связи — отправлю, когда появится сеть"
     }, function() {
       self.errorText = messageFrom(error)
-    })
+    }, error && error.requestKey)
   },
 
   // Распознанное показываем до сохранения: неверно расслышанная заметка

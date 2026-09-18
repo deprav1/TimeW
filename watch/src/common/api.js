@@ -292,6 +292,10 @@ export function voiceUri(uri, contentType, intent, done, fail, options) {
       rememberTransferMode(mode)
       done(response, mode)
     }, function(error) {
+      // Preserve the idempotency key across an offline defer. If the gateway
+      // committed the note but the response was lost, retrying with a new key
+      // would create a duplicate note.
+      if (error && !error.requestKey) error.requestKey = requestKey
       // Отказ шлюза и пропавший файл повторять нечем: второй способ доставки
       // получит тот же ответ, а человек лишний раз подождёт таймаут.
       if (error && (error.serverError || error.gone)) {

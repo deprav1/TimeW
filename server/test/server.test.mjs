@@ -127,6 +127,7 @@ test("GET /health is public and reports demo mode", async () => {
   const body = await res.json();
   assert.equal(body.ok, true);
   assert.equal(body.mode, "demo");
+  assert.equal(body.buildId, config.buildId);
 });
 
 test("GET /api/v1/status is protected and reports capabilities without secrets", async () => {
@@ -139,6 +140,7 @@ test("GET /api/v1/status is protected and reports capabilities without secrets",
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.mode, "demo");
+    assert.equal(body.buildId, config.buildId);
     assert.equal(body.capabilities.notes, true);
     assert.equal(body.capabilities.homeConfirmation, true);
     assert.equal("apiKey" in body, false);
@@ -441,7 +443,7 @@ test("OPTIONS returns 204 with no body and CORS headers", async () => {
   assert.equal(text, "");
   assert.equal(res.headers.get("access-control-allow-origin"), "*");
   assert.equal(res.headers.get("access-control-allow-methods"), "GET, POST, DELETE, OPTIONS");
-  assert.equal(res.headers.get("access-control-allow-headers"), "Content-Type, X-TimeW-Device-Token");
+  assert.equal(res.headers.get("access-control-allow-headers"), "Content-Type, X-TimeW-Device-Token, Idempotency-Key, X-TimeW-Request-Id");
   assert.equal(res.headers.get("access-control-max-age"), "86400");
 });
 

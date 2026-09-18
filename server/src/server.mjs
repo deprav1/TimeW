@@ -21,6 +21,9 @@ try {
 const config = {
   host: env.HOST || "127.0.0.1",
   port: Number(env.PORT || 8787),
+  // Deploys may inject a commit SHA/revision so a cloud endpoint cannot look
+  // current merely because its semantic version still matches the checkout.
+  buildId: env.TIMEW_BUILD_ID || env.DENO_DEPLOYMENT_ID || env.GIT_SHA || "local",
   token: env.DEVICE_TOKEN || "",
   dataDir: env.DATA_DIR ? resolveDataDir(env.DATA_DIR) : join(ROOT, "..", "data"),
   provider: env.AI_PROVIDER || "mock",
@@ -1295,7 +1298,7 @@ async function route(req, res) {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, X-TimeW-Device-Token",
+      "Access-Control-Allow-Headers": "Content-Type, X-TimeW-Device-Token, Idempotency-Key, X-TimeW-Request-Id",
       "Access-Control-Max-Age": "86400"
     });
     return res.end();
@@ -1306,7 +1309,7 @@ async function route(req, res) {
   }
 
   if (req.method === "GET" && pathname === "/health") {
-    return json(res, 200, { ok: true, service: "timew-gateway", mode: publicMode(), version: "0.2.0" });
+    return json(res, 200, { ok: true, service: "timew-gateway", mode: publicMode(), version: "0.2.0", buildId: config.buildId });
   }
 
   if (!authorized(req)) return error(res, 401, "Invalid device token", "unauthorized");
@@ -1317,6 +1320,7 @@ async function route(req, res) {
       service: "timew-gateway",
       mode: publicMode(),
       provider: config.provider,
+      buildId: config.buildId,
       capabilities: {
         ai: publicMode() === "live",
         notes: true,

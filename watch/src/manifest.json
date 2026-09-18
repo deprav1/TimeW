@@ -2,7 +2,7 @@
   "package": "com.timew.personal",
   "name": "TimeW",
   "versionName": "0.2.0",
-  "versionCode": 15,
+  "versionCode": 19,
   "minPlatformVersion": 1000,
   "icon": "/common/icon.png",
   "deviceTypeList": [
@@ -45,7 +45,6 @@
     "designWidth": 480,
     "background": {
       "features": [
-        "system.record",
         "system.audio",
         "system.request"
       ]

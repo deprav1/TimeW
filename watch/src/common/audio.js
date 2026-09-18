@@ -44,7 +44,10 @@ function primaryOptions() {
     duration: MAX_RECORDING_MS,
     sampleRate: 16000,
     numberOfChannels: 1,
-    encodeBitRate: 32000,
+    // Xiaomi's 16 kHz mono Opus guidance puts the efficient range below
+    // 23 kbps. 22 kbps keeps speech clear while avoiding needless upload
+    // size on a watch/phone link.
+    encodeBitRate: 22000,
     format: "opus"
   }
 }
@@ -94,7 +97,14 @@ function start(options, format, done, fail) {
   }
   Object.keys(options).forEach(function(key) { request[key] = options[key] })
 
-  record.start(request)
+  try {
+    record.start(request)
+  } catch (error) {
+    // Vela may reject an unsupported format or a missing microphone
+    // permission synchronously, without invoking fail. Treat that exactly
+    // like an asynchronous failure so the page never remains busy forever.
+    settle(function() { fail(errorFrom(error, error && error.code, "Не удалось начать запись")) })()
+  }
 }
 
 // Останавливает запись досрочно. duration уже задан, поэтому в обычном

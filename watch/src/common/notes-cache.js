@@ -1,4 +1,7 @@
 import storage from "@system.storage"
+import { guard } from "./guard"
+
+var STORAGE_TIMEOUT_MS = 1000
 
 // Последний известный список заметок, сохранённый на часах.
 //
@@ -45,17 +48,28 @@ function deserialize(raw) {
 // done(notes | null). null означает «кэша нет», и это не то же самое, что
 // пустой список: пустой — «заметок нет», null — «мы не знаем».
 export function loadCachedNotes(done) {
-  storage.get({
-    key: STORAGE_KEY,
-    success: function(raw) {
-      cache = deserialize(raw)
-      if (done) done(cache)
-    },
-    fail: function() {
+  var settle = guard(STORAGE_TIMEOUT_MS, function() {
+    cache = null
+    if (done) done(null)
+  })
+  try {
+    storage.get({
+      key: STORAGE_KEY,
+      success: settle(function(raw) {
+        cache = deserialize(raw)
+        if (done) done(cache)
+      }),
+      fail: settle(function() {
+        cache = null
+        if (done) done(null)
+      })
+    })
+  } catch (error) {
+    settle(function() {
       cache = null
       if (done) done(null)
-    }
-  })
+    })()
+  }
 }
 
 export function getCachedNotes() {
@@ -74,10 +88,15 @@ export function saveCachedNotes(notes, done) {
     if (done) done(false)
     return
   }
-  storage.set({
-    key: STORAGE_KEY,
-    value: value,
-    success: function() { if (done) done(true) },
-    fail: function() { if (done) done(false) }
-  })
+  var settle = guard(STORAGE_TIMEOUT_MS, function() { if (done) done(false) })
+  try {
+    storage.set({
+      key: STORAGE_KEY,
+      value: value,
+      success: settle(function() { if (done) done(true) }),
+      fail: settle(function() { if (done) done(false) })
+    })
+  } catch (error) {
+    settle(function() { if (done) done(false) })()
+  }
 }

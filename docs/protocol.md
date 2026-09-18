@@ -42,7 +42,7 @@ Access-Control-Max-Age: 86400
 `GET /health` — без токена.
 
 ```json
-{"ok":true,"service":"timew-gateway","mode":"demo","version":"0.2.0"}
+{"ok":true,"service":"timew-gateway","mode":"demo","version":"0.2.0","buildId":"local"}
 ```
 
 `mode` — `demo`, когда `AI_PROVIDER=mock` или не задан ключ, иначе `live`.
@@ -51,7 +51,7 @@ Access-Control-Max-Age: 86400
 эффективный режим и флаги возможностей без ключей и других секретов:
 
 ```json
-{"ok":true,"service":"timew-gateway","mode":"demo","provider":"mock","capabilities":{"ai":false,"notes":true,"speech":false,"home":false,"homeConfirmation":true}}
+{"ok":true,"service":"timew-gateway","mode":"demo","provider":"mock","buildId":"local","capabilities":{"ai":false,"notes":true,"speech":false,"home":false,"homeConfirmation":true}}
 ```
 
 ## Текстовый запрос
@@ -150,9 +150,10 @@ kind определяется так же, как в /api/v1/query: при inten
 
 Для проверки с компьютера есть `POST /api/v1/speak` с телом `{"text":"…"}` (до 1000 символов), отдающий `audio/mpeg` напрямую.
 
-TTS настраивается отдельно: `TTS_PROVIDER=openai-compatible`, `TTS_API_KEY`
-и при необходимости `TTS_BASE_URL`. При Gemini `AI_API_KEY` никогда не
-передаётся в OpenAI-совместимый TTS endpoint.
+При `AI_PROVIDER=gemini` TTS по умолчанию использует тот же `AI_API_KEY` и
+Gemini speech model; отдельный ключ не нужен. `TTS_PROVIDER=openai-compatible`,
+`TTS_API_KEY` и `TTS_BASE_URL` нужны только для отдельного OpenAI-совместимого
+синтеза. Ключ Gemini никогда не передаётся в такой endpoint.
 
 ## Заметки
 

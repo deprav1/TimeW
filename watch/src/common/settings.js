@@ -1,5 +1,8 @@
 import storage from "@system.storage"
 import { GATEWAY_URL, DEVICE_TOKEN, SPEAK_ANSWERS, AI_PROVIDER, TRANSFER_MODE, CONFIG_STAMP } from "./config"
+import { guard } from "./guard"
+
+var STORAGE_TIMEOUT_MS = 1000
 
 // Настройки живут в @system.storage и переживают перезапуск приложения.
 // config.js задаёт только значения по умолчанию для первой установки.
@@ -76,17 +79,28 @@ function readKeys(index, accumulator, done) {
     return
   }
   var key = KEYS[index]
-  storage.get({
-    key: key,
-    success: function(raw) {
-      accumulator[key] = fromStored(key, raw)
-      readKeys(index + 1, accumulator, done)
-    },
-    fail: function() {
+  var settle = guard(STORAGE_TIMEOUT_MS, function() {
+    accumulator[key] = DEFAULTS[key]
+    readKeys(index + 1, accumulator, done)
+  })
+  try {
+    storage.get({
+      key: key,
+      success: settle(function(raw) {
+        accumulator[key] = fromStored(key, raw)
+        readKeys(index + 1, accumulator, done)
+      }),
+      fail: settle(function() {
+        accumulator[key] = DEFAULTS[key]
+        readKeys(index + 1, accumulator, done)
+      })
+    })
+  } catch (error) {
+    settle(function() {
       accumulator[key] = DEFAULTS[key]
       readKeys(index + 1, accumulator, done)
-    }
-  })
+    })()
+  }
 }
 
 export function loadSettings(done) {
@@ -100,12 +114,19 @@ function writeKeys(index, values, done, fail) {
     return
   }
   var key = KEYS[index]
-  storage.set({
-    key: key,
-    value: toStored(key, values[key]),
-    success: function() { writeKeys(index + 1, values, done, fail) },
-    fail: function(error) { if (fail) fail(error) }
+  var settle = guard(STORAGE_TIMEOUT_MS, function() {
+    if (fail) fail(new Error("Не удалось сохранить настройки на часах"))
   })
+  try {
+    storage.set({
+      key: key,
+      value: toStored(key, values[key]),
+      success: settle(function() { writeKeys(index + 1, values, done, fail) }),
+      fail: settle(function(error) { if (fail) fail(error) })
+    })
+  } catch (error) {
+    settle(function() { if (fail) fail(error) })()
+  }
 }
 
 export function saveSettings(settings, done, fail) {

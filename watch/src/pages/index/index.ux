@@ -38,7 +38,7 @@ import { recordAudio, stopRecording } from "../../common/audio"
 import { loadSettings, getCached } from "../../common/settings"
 import { speak } from "../../common/speech"
 import { isOnline } from "../../common/net"
-import { loadQueue, getQueued, flush, enqueue } from "../../common/queue"
+import { loadQueue, getQueued, flush } from "../../common/queue"
 import { loadCachedNotes } from "../../common/notes-cache"
 
 function messageFrom(error) {
@@ -58,16 +58,22 @@ export default {
     answerSource: "",
     speechId: "",
     voiceEpoch: 0,
-    recording: false
+    recording: false,
+    settingsReady: false,
+    lastSyncAt: 0
   },
 
   onShow() {
     var self = this
     loadSettings(function() {
+      self.settingsReady = true
       if (!getCached().gatewayUrl || !getCached().deviceToken) {
         self.errorText = "Шлюз не настроен"
         return
       }
+      var now = Date.now()
+      if (self.lastSyncAt && now - self.lastSyncAt < 30000) return
+      self.lastSyncAt = now
       // Кэш заметок нужен экрану заметок, но читаем его здесь: приложение
       // открывается с этого экрана, и к переходу список уже готов.
       loadCachedNotes(function() {
@@ -79,7 +85,6 @@ export default {
   // Досылка отложенных заметок идёт молча и не поднимает флаг занятости:
   // человек пришёл разговаривать, а не ждать синхронизацию.
   flushQueue() {
-    var self = this
     isOnline(function(online) {
       if (!online || getQueued().length === 0) return
       flush(function(item, onOk, onErr, onDrop) {
@@ -139,6 +144,10 @@ export default {
   // что человек договорил, и он стоял перед экраном, ожидая непонятно чего.
   // Повторное нажатие тогда отменяло всё целиком — худшее из поведений.
   talk() {
+    if (!this.settingsReady || !getCached().gatewayUrl || !getCached().deviceToken) {
+      this.errorText = "Сначала настройте шлюз"
+      return
+    }
     if (this.recording) {
       this.finishRecording()
       return

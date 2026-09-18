@@ -93,6 +93,17 @@ test("пропавшая запись отличается от обрыва с�
   assert.equal(error.gone, true, "иначе элемент навсегда застрянет в очереди на досылку");
 });
 
+test("обрыв после отправки сохраняет исходный ключ идемпотентности", async () => {
+  await ready();
+  file.files["internal://cache/a.opus"] = new ArrayBuffer(64);
+  fetchModule.scripted.push({ error: { message: "connection lost" } });
+  const error = await new Promise((resolve) => {
+    voiceUri("internal://cache/a.opus", "audio/opus", "note", () => resolve(null), resolve);
+  });
+  assert.ok(error?.requestKey, "иначе досылка после потерянного ответа создаст дубль");
+  assert.equal(lastCall().header["Idempotency-Key"], error.requestKey);
+});
+
 test("пустая запись не уходит в сеть", async () => {
   await ready();
   file.files["internal://cache/empty.opus"] = new ArrayBuffer(0);

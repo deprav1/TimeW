@@ -67,6 +67,15 @@ test("сломанный storage не оставляет экран настро
   assert.equal(settings.gatewayUrl, GATEWAY_URL, "ожидались значения по умолчанию, а не зависание");
 });
 
+test("молчащий storage не оставляет загрузку настроек навсегда", async () => {
+  resetAll();
+  storage.silentGet = true;
+  const started = Date.now();
+  const settings = await new Promise((resolve) => loadSettings(resolve));
+  assert.equal(settings.gatewayUrl, GATEWAY_URL);
+  assert.ok(Date.now() - started < 20000);
+});
+
 test("сработавший способ доставки записи запоминается", async () => {
   resetAll();
   await load();

@@ -14,14 +14,18 @@ export const storage = {
   data: {},
   failOnSet: false,
   failOnGet: false,
+  silentGet: false,
+  silentSet: false,
 
   get({ key, success, fail }) {
+    if (storage.silentGet) return;
     if (storage.failOnGet) return void setTimeout(() => fail && fail({ message: "storage get failed" }), 0);
     // Настоящий storage отдаёт "" для незаданного ключа, а не undefined.
     setTimeout(() => success && success(storage.data[key] === undefined ? "" : storage.data[key]), 0);
   },
 
   set({ key, value, success, fail }) {
+    if (storage.silentSet) return;
     if (storage.failOnSet) return void setTimeout(() => fail && fail({ message: "storage set failed" }), 0);
     storage.data[key] = String(value);
     setTimeout(() => success && success(), 0);
@@ -31,6 +35,8 @@ export const storage = {
     storage.data = {};
     storage.failOnSet = false;
     storage.failOnGet = false;
+    storage.silentGet = false;
+    storage.silentSet = false;
   }
 };
 
@@ -82,17 +88,52 @@ export const file = {
     if (bytes === undefined) return void setTimeout(() => fail && fail({ message: "file not found" }), 0);
     setTimeout(() => success && success({ buffer: bytes }), 0);
   },
+  copy({ srcUri, dstUri, success, fail }) {
+    const bytes = file.files[srcUri];
+    if (bytes === undefined) return void (fail && fail({ message: "file not found" }));
+    file.files[dstUri] = bytes;
+    if (success) success(dstUri);
+  },
+  delete({ uri, success, fail }) {
+    if (file.files[uri] === undefined) return void (fail && fail({ message: "file not found" }));
+    delete file.files[uri];
+    if (success) success();
+  },
   reset() {
     file.files = {};
     file.silent = false;
   }
 };
 
-// request.upload намеренно отсутствует: опрос реального рантайма показал,
-// что метода нет. Тесты опираются на это, чтобы фолбэк проверялся всерьёз.
 export const request = {
-  download() {},
-  onDownloadComplete() {}
+  // request.upload намеренно отсутствует: опрос реального рантайма показал,
+  // что метода нет. Тесты опираются на это, чтобы фолбэк проверялся всерьёз.
+  downloadResult: null,
+  completeResult: null,
+  throwOnDownload: false,
+  throwOnComplete: false,
+  download(options) {
+    if (request.throwOnDownload) throw new Error("download unavailable");
+    const next = request.downloadResult;
+    if (!next) return;
+    setTimeout(() => next.error
+      ? options.fail && options.fail(next.error, next.code)
+      : options.success && options.success(next.result), 0);
+  },
+  onDownloadComplete(options) {
+    if (request.throwOnComplete) throw new Error("download completion unavailable");
+    const next = request.completeResult;
+    if (!next) return;
+    setTimeout(() => next.error
+      ? options.fail && options.fail(next.error, next.code)
+      : options.success && options.success(next.result), 0);
+  },
+  reset() {
+    request.downloadResult = null;
+    request.completeResult = null;
+    request.throwOnDownload = false;
+    request.throwOnComplete = false;
+  }
 };
 
 export const prompt = {
@@ -114,7 +155,9 @@ export const prompt = {
 
 export const record = {
   scripted: null,
+  throwOnStart: false,
   start(options) {
+    if (record.throwOnStart) throw new Error("record unavailable");
     const next = record.scripted;
     if (!next) return;
     setTimeout(() => {
@@ -125,12 +168,28 @@ export const record = {
   stop() {},
   reset() {
     record.scripted = null;
+    record.throwOnStart = false;
   }
 };
 
 export const vibrator = { vibrate() {} };
 export const router = { pushes: [], push(o) { router.pushes.push(o); }, back() {}, reset() { router.pushes = []; } };
-export const audio = {};
+export const audio = {
+  src: "",
+  onended: null,
+  onstop: null,
+  onerror: null,
+  playCalls: 0,
+  play() { audio.playCalls += 1; },
+  stop() { if (audio.onstop) audio.onstop(); },
+  reset() {
+    audio.src = "";
+    audio.onended = null;
+    audio.onstop = null;
+    audio.onerror = null;
+    audio.playCalls = 0;
+  }
+};
 export const media = {};
 
 export function resetAll() {
@@ -138,7 +197,9 @@ export function resetAll() {
   network.reset();
   fetchModule.reset();
   file.reset();
+  request.reset();
   prompt.reset();
   record.reset();
+  audio.reset();
   router.reset();
 }

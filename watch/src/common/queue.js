@@ -1,4 +1,6 @@
 import storage from "@system.storage"
+import file from "@system.file"
+import { guard } from "./guard"
 
 // Офлайн-очередь заметок поверх @system.storage. Когда отправка не удалась
 // из-за связи, заметка не теряется, а копится здесь до следующей попытки.
@@ -14,13 +16,16 @@ import storage from "@system.storage"
 //                  распознаёт шлюз, поэтому без сети текста взяться неоткуда,
 //                  и сохранить можно только звук.
 //
-// Записи живут в кэше приложения, и рантайм вправе их убрать. Поэтому у
-// звуковых элементов есть срок годности, а исчезнувший файл удаляется из
-// очереди, а не застревает в ней навсегда.
+// Запись сначала переносится из internal://cache в internal://files. Если
+// рантайм не поддерживает копирование, сохраняется исходный URI как
+// совместимый fallback; исчезнувший файл тогда удаляется из очереди, а не
+// застревает в ней навсегда.
 
 var STORAGE_KEY = "pendingNotes"
 var MAX_QUEUE_SIZE = 50
 var AUDIO_TTL_MS = 7 * 24 * 60 * 60 * 1000
+var FILE_COPY_TIMEOUT_MS = 5000
+var STORAGE_TIMEOUT_MS = 1000
 
 var cache = []
 var counter = 0
@@ -72,28 +77,44 @@ function deserialize(raw) {
 }
 
 function persist(list, done) {
-  storage.set({
-    key: STORAGE_KEY,
-    value: serialize(list),
-    success: function() { if (done) done(true) },
-    fail: function() { if (done) done(false) }
-  })
+  var settle = guard(STORAGE_TIMEOUT_MS, function() { if (done) done(false) })
+  try {
+    storage.set({
+      key: STORAGE_KEY,
+      value: serialize(list),
+      success: settle(function() { if (done) done(true) }),
+      fail: settle(function() { if (done) done(false) })
+    })
+  } catch (error) {
+    settle(function() { if (done) done(false) })()
+  }
 }
 
 // Читает очередь из storage в кэш при старте приложения. Любая ошибка
 // storage не должна ронять приложение — продолжаем с пустой очередью.
 export function loadQueue(done) {
-  storage.get({
-    key: STORAGE_KEY,
-    success: function(raw) {
-      cache = deserialize(raw)
-      if (done) done(cache)
-    },
-    fail: function() {
+  var settle = guard(STORAGE_TIMEOUT_MS, function() {
+    cache = []
+    if (done) done(cache)
+  })
+  try {
+    storage.get({
+      key: STORAGE_KEY,
+      success: settle(function(raw) {
+        cache = deserialize(raw)
+        if (done) done(cache)
+      }),
+      fail: settle(function() {
+        cache = []
+        if (done) done(cache)
+      })
+    })
+  } catch (error) {
+    settle(function() {
       cache = []
       if (done) done(cache)
-    }
-  })
+    })()
+  }
 }
 
 // Синхронный доступ к текущему кэшу — по образцу getCached() в settings.js,
@@ -113,12 +134,50 @@ export function enqueue(text, done, fail, requestId) {
 // Откладывает саму запись: сети нет, распознать некому, но голос человека
 // терять нельзя. requestId фиксируется здесь и переживает перезапуск, чтобы
 // повторная досылка не создала вторую заметку.
-export function enqueueAudio(uri, contentType, done, fail) {
+export function enqueueAudio(uri, contentType, done, fail, requestId) {
   if (!uri) {
     if (done) done(cache)
     return
   }
-  push({ kind: "audio", uri: uri, contentType: contentType || "", requestId: makeId() }, done, fail)
+  var fields = { kind: "audio", uri: uri, contentType: contentType || "", requestId: requestId || makeId() }
+  // @system.record stores its result in internal://cache, which Vela may
+  // purge under storage pressure. Copy it to the persistent files partition
+  // before reporting that the offline item was saved. Unknown URI schemes or
+  // older runtimes fall back to the original URI rather than losing the note.
+  if (typeof file.copy !== "function" || String(uri).indexOf("internal://cache/") !== 0) {
+    push(fields, done, fail)
+    return
+  }
+  var suffix = contentType === "audio/wav" ? ".wav" : contentType === "audio/opus" ? ".opus" : ".bin"
+  var durableUri = "internal://files/timew/pending-" + makeId() + suffix
+  var settle = guard(FILE_COPY_TIMEOUT_MS, function() { push(fields, done, fail) })
+  function copy() {
+    try {
+      file.copy({
+        srcUri: uri,
+        dstUri: durableUri,
+        success: settle(function(result) {
+          fields.uri = typeof result === "string" ? result : durableUri
+          push(fields, done, fail)
+        }),
+        fail: settle(function() { push(fields, done, fail) })
+      })
+    } catch (error) {
+      settle(function() { push(fields, done, fail) })()
+    }
+  }
+  // The destination directory may not exist on a fresh install. mkdir is
+  // best-effort: an existing directory reports failure on some firmware, and
+  // copy itself is still the authoritative operation.
+  if (typeof file.mkdir === "function") {
+    try {
+      file.mkdir({ uri: "internal://files/timew", recursive: true, success: copy, fail: copy })
+    } catch (error) {
+      copy()
+    }
+  } else {
+    copy()
+  }
 }
 
 function push(fields, done, fail) {
@@ -182,6 +241,19 @@ export function flush(sendOne, done) {
     // drop — элемент отправить невозможно в принципе (файл записи пропал).
     // Он убирается из очереди, и досылка идёт дальше: иначе один потерянный
     // файл навсегда заблокировал бы всё, что стоит за ним.
+    function cleanup(item, next) {
+      if (item.kind !== "audio" || String(item.uri).indexOf("internal://files/") !== 0 || typeof file.delete !== "function") {
+        next()
+        return
+      }
+      var finish = guard(1500, next)
+      try {
+        file.delete({ uri: item.uri, success: finish(function() { next() }), fail: finish(function() { next() }) })
+      } catch (error) {
+        finish(function() { next() })()
+      }
+    }
+
     function remove(counts, next) {
       var previous = cache
       removeFromCache(item.id)
@@ -193,7 +265,7 @@ export function flush(sendOne, done) {
           finish()
           return
         }
-        next()
+        cleanup(item, next)
       })
     }
 
