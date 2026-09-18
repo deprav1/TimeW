@@ -44,7 +44,12 @@
     <text class="check-result" if="{{checkResult}}">{{checkResult}}</text>
     <text class="error-text" if="{{errorText}}">{{errorText}}</text>
 
-    <text class="note-line" onclick="openDiag">Адрес и токен — из сборки. Нажмите для диагностики</text>
+    <div class="row diag-row" onclick="openDiag">
+      <text class="row-label">Диагностика</text>
+      <text class="row-value">проверить всё →</text>
+    </div>
+
+    <text class="note-line">Сборка {{versionCode}} · адрес и токен из неё</text>
 
     <div class="action-row">
       <div class="small-button" onclick="checkConnection"><text class="small-label">Проверить связь</text></div>
@@ -58,6 +63,7 @@ import router from "@system.router"
 import fetch from "@system.fetch"
 import { loadSettings, saveSettings } from "../../common/settings"
 import { networkType } from "../../common/net"
+import { VERSION_CODE } from "../../common/build-info"
 
 function labelForNetwork(type) {
   if (!type) return "не определена"
@@ -124,7 +130,9 @@ export default {
     errorText: "",
     networkDisplay: "…",
     // Каким путём шла последняя проверка связи — попадает в её результат.
-    checkVia: ""
+    checkVia: "",
+    // Номер сборки: единственный способ понять, что именно стоит на часах.
+    versionCode: VERSION_CODE
   },
 
   onInit() {
@@ -293,14 +301,15 @@ export default {
 .topbar { flex-direction: row; justify-content: center; align-items: center; height: 26px; }
 .brand { color: #7de3ff; font-size: 17px; font-weight: bold; }
 .back { color: #70d7ef; font-size: 16px; margin-left: 12px; padding-left: 6px; padding-right: 6px; }
-.row { flex-direction: row; align-items: center; justify-content: space-between; height: 42px; margin-top: 6px; padding-left: 12px; padding-right: 12px; border-radius: 12px; background-color: #141d33; }
+.row { flex-direction: row; align-items: center; justify-content: space-between; height: 38px; margin-top: 5px; padding-left: 12px; padding-right: 12px; border-radius: 12px; background-color: #141d33; }
 .row-label { color: #8fa7ca; font-size: 15px; }
 .row-value { color: #eaf1ff; font-size: 15px; margin-left: 10px; flex: 1; lines: 1; text-overflow: ellipsis; text-align: right; }
 .check-result { color: #7de3ff; font-size: 15px; margin-top: 10px; lines: 2; text-overflow: ellipsis; text-align: center; width: 100%; }
 .note-line { color: #5d6c8c; font-size: 13px; margin-top: 6px; lines: 1; text-overflow: ellipsis; text-align: center; width: 100%; }
 .error-text { color: #ff8f8f; font-size: 14px; margin-top: 6px; lines: 3; text-overflow: ellipsis; text-align: center; width: 100%; }
-.action-row { flex-direction: row; margin-top: 12px; justify-content: center; }
+.action-row { flex-direction: row; margin-top: 10px; justify-content: center; }
 .small-button { width: 130px; height: 40px; margin-left: 5px; margin-right: 5px; border-radius: 13px; background-color: #2b9ec2; justify-content: center; align-items: center; }
 .save-button { background-color: #2b9ec2; }
 .small-label { color: #07111e; font-size: 16px; font-weight: bold; }
+.diag-row { background-color: #1d3550; }
 </style>

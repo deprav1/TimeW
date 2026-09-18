@@ -490,12 +490,29 @@ async function fetchWithTimeout(url, options, timeoutMs, messages) {
   }
 }
 
-async function fetchProvider(url, options) {
-  return fetchWithTimeout(url, options, config.providerTimeoutMs, {
+// Одна повторная попытка при внутренней ошибке провайдера.
+//
+// По логам с устройства: из четырёх голосовых запросов два получили от
+// Gemini «HTTP 500: Internal error encountered» — это его собственный сбой,
+// не связанный с записью. Человеку на часах в этот момент виден отказ, и он
+// переспрашивает вручную: те же секунды, но с раздражением. Повторяем сами.
+//
+// Только 500 и 503: на 400 повтор бессмыслен (запрос не понравится и во
+// второй раз), а на 429 — вреден, это просьба сбавить темп.
+const PROVIDER_RETRY_STATUS = new Set([500, 503]);
+
+async function fetchProvider(url, options, { retry = true } = {}) {
+  const send = () => fetchWithTimeout(url, options, config.providerTimeoutMs, {
     label: "AI provider",
     timeoutPublic: "AI не ответил вовремя. Попробуйте ещё раз.",
     networkPublic: "AI-сервис сейчас недоступен."
   });
+
+  const response = await send();
+  if (!retry || response.ok || !PROVIDER_RETRY_STATUS.has(response.status)) return response;
+
+  console.error(`[${new Date().toISOString()}] провайдер ответил ${response.status}, повторяю запрос`);
+  return send();
 }
 
 async function fetchTuya(url, options) {

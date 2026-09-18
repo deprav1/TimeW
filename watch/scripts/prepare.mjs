@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 
 const WATCH_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 const configPath = join(WATCH_DIR, "src", "common", "config.local.js");
+const buildInfoPath = join(WATCH_DIR, "src", "common", "build-info.js");
 const manifestPath = join(WATCH_DIR, "src", "manifest.json");
 
 if (!existsSync(configPath)) {
@@ -26,11 +27,23 @@ export var LOCAL = {}
   console.log("config.local.js не найден — создана заглушка. Запустите `npm run setup`, чтобы прописать адрес и токен.");
 }
 
+// Номер сборки нужен и самому приложению: по нему видно, что установлено
+// на часах. Метка из config.local.js для этого не годится — она меняется
+// только при setup, а сборок между ними бывает несколько.
+function writeBuildInfo(versionCode) {
+  writeFileSync(buildInfoPath, `// Генерируется сборкой. В git не хранится.
+export var VERSION_CODE = ${versionCode}
+`, "utf8");
+}
+
+if (!existsSync(buildInfoPath)) writeBuildInfo(0);
+
 if (process.argv.includes("--bump")) {
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   manifest.versionCode = Number(manifest.versionCode || 0) + 1;
   // Записываем с тем же отступом, что и в файле, чтобы автоматический
   // инкремент не создавал шумную диффу на весь манифест.
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  writeBuildInfo(manifest.versionCode);
   console.log(`versionCode → ${manifest.versionCode}`);
 }

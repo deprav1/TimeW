@@ -15,3 +15,4 @@ deno.lock
 .deno-token
 deno.txt
 node_modules/
+watch/src/common/build-info.js

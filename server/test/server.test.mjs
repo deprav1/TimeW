@@ -1822,3 +1822,67 @@ test("пустая запись в JSON отклоняется", async () => {
   });
   assert.equal(res.status, 400);
 });
+
+test("внутренняя ошибка провайдера повторяется один раз", async () => {
+  // По логам с устройства половина голосовых запросов получала от Gemini
+  // «HTTP 500: Internal error» — его собственный сбой, не связанный с
+  // записью. Повтор делает это незаметным для человека.
+  let attempts = 0;
+  const ogg = Buffer.concat([Buffer.from("OggS"), Buffer.alloc(80)]);
+  await withMockGemini(
+    (req, res) => {
+      attempts += 1;
+      req.resume();
+      req.on("end", () => {
+        if (attempts === 1) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: { message: "Internal error encountered." } }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify({ transcript: "привет", answer: "здравствуйте" }) }] } }] }));
+      });
+    },
+    async () => {
+      const original = config.provider;
+      config.provider = "gemini";
+      try {
+        const res = await fetch(`${base}/api/v1/voice`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ audioBase64: ogg.toString("base64"), contentType: "audio/opus" })
+        });
+        assert.equal(res.status, 200, "после повтора запрос обязан пройти");
+        assert.equal(attempts, 2, "ровно одна повторная попытка, не больше");
+      } finally { config.provider = original; }
+    }
+  );
+});
+
+test("отказ провайдера по существу не повторяется", async () => {
+  // На 400 повтор бессмыслен: тот же запрос не понравится и во второй раз.
+  let attempts = 0;
+  const ogg = Buffer.concat([Buffer.from("OggS"), Buffer.alloc(80)]);
+  await withMockGemini(
+    (req, res) => {
+      attempts += 1;
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "Invalid argument" } }));
+      });
+    },
+    async () => {
+      const original = config.provider;
+      config.provider = "gemini";
+      try {
+        await fetch(`${base}/api/v1/voice`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ audioBase64: ogg.toString("base64"), contentType: "audio/opus" })
+        });
+        assert.equal(attempts, 1);
+      } finally { config.provider = original; }
+    }
+  );
+});

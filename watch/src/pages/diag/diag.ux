@@ -38,6 +38,7 @@ import { networkType } from "../../common/net"
 import { sendDiagnostics } from "../../common/api"
 import { recordAudio } from "../../common/audio"
 import { CONFIG_STAMP } from "../../common/config"
+import { VERSION_CODE } from "../../common/build-info"
 
 // Опрос рантайма: какие методы на самом деле есть на этой прошивке.
 // Именно так когда-то выяснилось, что prompt.show и request.upload
@@ -90,6 +91,7 @@ export default {
     var report = {
       startedAt: new Date().toISOString(),
       build: CONFIG_STAMP,
+      versionCode: VERSION_CODE,
       modules: [
         probe("record", record, ["start", "stop"]),
         probe("request", request, ["upload", "download", "onDownloadComplete"]),
@@ -100,6 +102,7 @@ export default {
       steps: []
     }
 
+    self.add("сборка часов", String(VERSION_CODE))
     report.modules.forEach(function(entry) {
       self.add(entry.module, (entry.present.join(",") || "нет методов") + (entry.missing.length ? " | нет: " + entry.missing.join(",") : ""))
     })
