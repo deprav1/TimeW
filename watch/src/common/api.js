@@ -244,13 +244,54 @@ function uploadByBytes(path, uri, contentType, intent, requestKey, preview, done
   })
 }
 
+var BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+// Своя кодировка: btoa в рантайме Vela не гарантирован, а принимать на веру
+// после истории с request.upload и prompt.show не стоит.
+function toBase64(buffer) {
+  var bytes = new Uint8Array(buffer)
+  var out = ""
+  var i = 0
+  for (; i + 2 < bytes.length; i += 3) {
+    var n = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2]
+    out += BASE64_ALPHABET.charAt((n >> 18) & 63) + BASE64_ALPHABET.charAt((n >> 12) & 63) +
+           BASE64_ALPHABET.charAt((n >> 6) & 63) + BASE64_ALPHABET.charAt(n & 63)
+  }
+  var left = bytes.length - i
+  if (left === 1) {
+    var a = bytes[i] << 16
+    out += BASE64_ALPHABET.charAt((a >> 18) & 63) + BASE64_ALPHABET.charAt((a >> 12) & 63) + "=="
+  } else if (left === 2) {
+    var b = (bytes[i] << 16) | (bytes[i + 1] << 8)
+    out += BASE64_ALPHABET.charAt((b >> 18) & 63) + BASE64_ALPHABET.charAt((b >> 12) & 63) +
+           BASE64_ALPHABET.charAt((b >> 6) & 63) + "="
+  }
+  return out
+}
+
+// Запись уходит текстом внутри JSON, а не двоичным телом.
+//
+// Проверено на устройстве: рантайм Vela двоичное тело не отправляет. В теле
+// запроса на шлюзе оказался обрывок текста HTTP-запроса («POST /api/v1…»),
+// а тип содержимого рантайм дополнил charset=utf-8 — то есть счёл тело
+// текстом и подставил что-то своё. Текстовые запросы с часов работают
+// надёжно, поэтому запись едет как base64: плюс треть объёма, зато доезжает.
 function sendAudioBytes(path, audio, contentType, intent, requestKey, preview, done, fail) {
-  var requestHeaders = headers({ "Content-Type": contentType || "application/octet-stream", "Idempotency-Key": requestKey })
+  var encoded
+  try {
+    encoded = toBase64(audio)
+  } catch (error) {
+    fail({ message: "Не удалось подготовить запись к отправке" })
+    return
+  }
   callFetch({
     url: baseUrl() + withProvider(path, intent, preview),
     method: "POST",
-    header: requestHeaders,
-    data: audio
+    header: headers({ "Idempotency-Key": requestKey }),
+    data: JSON.stringify({
+      audioBase64: encoded,
+      contentType: contentType || "application/octet-stream"
+    })
   }, UPLOAD_TIMEOUT_MS, done, fail)
 }
 

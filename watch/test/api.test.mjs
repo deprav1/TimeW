@@ -175,3 +175,17 @@ test("домашняя команда выполняется отдельным 
   assert.equal(lastCall().url, `${GATEWAY}/api/v1/home/confirm`);
   assert.equal(JSON.parse(lastCall().data).confirmationToken, "одноразовый-токен");
 });
+
+test("запись уходит текстом в JSON, а не двоичным телом", async () => {
+  await ready();
+  // Четыре байта «OggS» — проверяем и кодирование, и то, что тип сохранён.
+  file.files["internal://cache/a.opus"] = new Uint8Array([0x4f, 0x67, 0x67, 0x53, 0x01, 0x02]).buffer;
+  fetchModule.scripted.push(ok({ kind: "ai", text: "ответ", transcript: "вопрос" }));
+  await new Promise((done, fail) => voiceUri("internal://cache/a.opus", "audio/opus", "", done, fail));
+
+  const call = lastCall();
+  assert.equal(call.header["Content-Type"], "application/json", "двоичное тело рантайм часов не отправляет");
+  const body = JSON.parse(call.data);
+  assert.equal(body.contentType, "audio/opus");
+  assert.equal(body.audioBase64, "T2dnUwEC", "кодирование должно быть обычным base64");
+});

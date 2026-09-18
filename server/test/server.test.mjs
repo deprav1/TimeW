@@ -1782,3 +1782,43 @@ test("AMR отклоняется с объяснением: Gemini его не �
     }
   );
 });
+
+test("запись принимается текстом в JSON: рантайм часов не отправляет двоичное тело", async () => {
+  const ogg = Buffer.concat([Buffer.from("OggS"), Buffer.alloc(80)]);
+  let sentMime = null;
+  await withMockGemini(
+    (req, res) => {
+      let raw = "";
+      req.on("data", (c) => { raw += c; });
+      req.on("end", () => {
+        sentMime = JSON.parse(raw).contents[0].parts.find((p) => p.inlineData).inlineData.mimeType;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify({ transcript: "привет", answer: "привет" }) }] } }] }));
+      });
+    },
+    async () => {
+      const original = config.provider;
+      config.provider = "gemini";
+      try {
+        const res = await fetch(`${base}/api/v1/voice`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ audioBase64: ogg.toString("base64"), contentType: "audio/opus" })
+        });
+        assert.equal(res.status, 200);
+        const body = await res.json();
+        assert.equal(body.transcript, "привет");
+        assert.equal(sentMime, "audio/ogg", "формат по-прежнему определяется по байтам, а не по заявленному типу");
+      } finally { config.provider = original; }
+    }
+  );
+});
+
+test("пустая запись в JSON отклоняется", async () => {
+  const res = await fetch(`${base}/api/v1/voice`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ audioBase64: "", contentType: "audio/opus" })
+  });
+  assert.equal(res.status, 400);
+});

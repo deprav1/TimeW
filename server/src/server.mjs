@@ -428,12 +428,37 @@ function extractMultipartField(body, contentType, fieldName) {
 // MAX_AUDIO_BYTES. Also hands back the raw buffer/content-type so callers
 // that need multipart text fields (e.g. an optional `provider` override)
 // can pull them out without re-reading the request.
+// Запись приходит тремя способами, и все три нужны.
+//
+// JSON с полем audioBase64 — основной для часов. Рантайм Vela не умеет
+// отправлять двоичное тело: проверено на устройстве, вместо записи в теле
+// оказался обрывок текста HTTP-запроса («POST /api/v1…»), а заголовок типа
+// он дополнил charset=utf-8, то есть счёл тело текстом. Текстовые запросы
+// с часов работают надёжно, поэтому запись едет как base64.
+//
+// Сырые байты и multipart оставлены: ими пользуются дымовой прогон, другие
+// клиенты и прошивки, где двоичное тело работает.
+function decodeBase64Audio(raw) {
+  let body;
+  try {
+    body = JSON.parse(raw.toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!body || typeof body.audioBase64 !== "string") return null;
+  const bytes = Buffer.from(body.audioBase64, "base64");
+  if (!bytes.length) throw Object.assign(new Error("audioBase64 is empty"), { statusCode: 400 });
+  return { bytes, contentType: typeof body.contentType === "string" && body.contentType ? body.contentType : "application/octet-stream" };
+}
+
 async function readAudioBody(req) {
   const requestType = req.headers["content-type"] || "application/octet-stream";
-  const raw = await bodyBuffer(req, config.maxAudioBytes + 64 * 1024);
+  const raw = await bodyBuffer(req, Math.round(config.maxAudioBytes * 1.4) + 64 * 1024);
   if (!raw.length) throw Object.assign(new Error("audio body is required"), { statusCode: 400 });
   const isMultipart = requestType.toLowerCase().startsWith("multipart/form-data");
-  const audio = isMultipart ? extractMultipartAudio(raw, requestType) : { bytes: raw, contentType: requestType };
+  const isJson = requestType.toLowerCase().startsWith("application/json");
+  const fromJson = isJson ? decodeBase64Audio(raw) : null;
+  const audio = fromJson || (isMultipart ? extractMultipartAudio(raw, requestType) : { bytes: raw, contentType: requestType });
   if (audio.bytes.length > config.maxAudioBytes) throw Object.assign(new Error("audio is too large"), { statusCode: 413 });
   return { ...audio, raw, requestType, isMultipart };
 }
