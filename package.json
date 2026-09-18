@@ -2,7 +2,9 @@
   "name": "timew",
   "version": "0.2.0",
   "private": true,
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "comment": "Все команды проекта живут здесь, чтобы не надо было помнить, что запускается из server/, а что из watch/. Внутренние подпроекты по-прежнему самостоятельны.",
   "scripts": {
     "setup": "node server/scripts/setup.mjs",
@@ -13,6 +15,6 @@
     "test:watch": "npm --prefix watch test",
     "smoke": "node server/scripts/smoke.mjs",
     "build": "npm --prefix watch run build",
-    "deno": "npx --yes deno@latest run -A --unstable-kv server/src/deno-entry.mjs"
+    "deno": "node server/scripts/deno-local.mjs"
   }
 }

@@ -27,26 +27,42 @@ const { createKvStore } = await import("./store.mjs");
 const kv = await globalThis.Deno.openKv();
 setStore(createKvStore(kv));
 
-// Без токена шлюз в интернете беззащитен: его адрес публичный, и любой
-// желающий тратил бы ваш ключ AI и читал ваши заметки. Лучше не подняться
-// совсем, чем подняться открытым.
-if (!config.token) {
-  throw new Error("DEVICE_TOKEN не задан. Задайте его в переменных проекта — без него шлюз нельзя выставлять в интернет.");
-}
 if (config.provider !== "mock" && !config.apiKey) {
   console.warn(`Внимание: AI_PROVIDER=${config.provider}, но AI_API_KEY пуст — шлюз фактически работает в demo-режиме.`);
 }
 
-const handler = createFetchHandler(route, {
+const gateway = createFetchHandler(route, {
   log: config.logRequests ? (line) => console.log(`${new Date().toISOString()} ${line}`) : undefined
 });
 
-// На Deno Deploy порт назначает платформа, и указывать его нельзя.
-// Локально — берём тот же PORT, что и обычный запуск, иначе Deno molча
-// слушал бы свой порт по умолчанию, а проверка стучалась бы не туда.
-const onDeploy = Boolean(globalThis.Deno.env.get("DENO_DEPLOYMENT_ID"));
-if (onDeploy) {
-  globalThis.Deno.serve(handler);
-} else {
+// Без токена шлюз в интернете беззащитен: адрес публичный, и любой желающий
+// тратил бы ваш ключ AI и читал ваши заметки. Поэтому запросы не
+// обслуживаются — но приложение при этом поднимается и говорит, что не так.
+//
+// Раньше здесь было исключение при старте. На хосте это худший вариант: он
+// не поднимается вовсе, наружу видно только «revision failed», и причину
+// приходится искать в логах сборки.
+const handler = config.token
+  ? gateway
+  : () => {
+      console.error("DEVICE_TOKEN не задан — задайте его в переменных приложения и выложите заново.");
+      return new Response(
+        JSON.stringify({ ok: false, error: { code: "not_configured", message: "Шлюз не настроен: не задан DEVICE_TOKEN" } }),
+        { status: 503, headers: { "Content-Type": "application/json; charset=utf-8" } }
+      );
+    };
+
+// На хосте порт и интерфейс назначает платформа, и указывать их нельзя:
+// попытка слушать 127.0.0.1 внутри облака означает, что снаружи никто не
+// достучится. Локально наоборот — нужен тот же порт, что у обычного запуска,
+// иначе проверка стучится не туда.
+//
+// Признак локального запуска задаётся явно (TIMEW_LOCAL=1), а не угадывается
+// по переменным платформы: их набор у Deploy менялся, и ошибка в угадывании
+// проявляется только на живом хосте, где её труднее всего разглядеть.
+const local = Boolean(globalThis.Deno.env.get("TIMEW_LOCAL"));
+if (local) {
   globalThis.Deno.serve({ port: config.port, hostname: config.host }, handler);
+} else {
+  globalThis.Deno.serve(handler);
 }
