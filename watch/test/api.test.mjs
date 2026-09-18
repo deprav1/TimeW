@@ -141,7 +141,11 @@ test("молчащий системный модуль не вешает при�
   const started = Date.now();
   const error = await new Promise((resolve) => query("привет", () => resolve(null), resolve));
   assert.ok(error, "сторожевой таймер обязан сработать");
-  assert.ok(Date.now() - started < 20000);
+  // Граница привязана к самой константе, а не к числу: таймауты растут вместе
+  // с пониманием того, насколько медленным бывает канал через телефон, и
+  // зашитое число превращало бы такое изменение в ложное падение.
+  const { REQUEST_TIMEOUT_MS } = await import("../src/common/config.js");
+  assert.ok(Date.now() - started < REQUEST_TIMEOUT_MS + 5000, "ожидание не должно быть бесконечным");
 });
 
 test("недоступный fetch не роняет экран", async () => {

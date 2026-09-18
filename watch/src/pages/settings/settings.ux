@@ -198,7 +198,7 @@ export default {
       finished = true
       self.checkResult = ""
       self.errorText = "Шлюз не ответил вовремя"
-    }, 8000)
+    }, 20000)
     var settle = function(handler) {
       return function() {
         if (finished) return
