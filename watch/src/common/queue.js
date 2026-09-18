@@ -6,9 +6,21 @@ import storage from "@system.storage"
 // Массив хранится как одна JSON-строка под одним ключом: storage в Vela
 // умеет только строки, а отдельный ключ на запись плодил бы неограниченно
 // растущий список ключей без возможности их перечислить.
+//
+// В очереди два вида элементов:
+//   kind "text"  — текст заметки, когда распознавание уже прошло;
+//   kind "audio" — сама запись (uri файла на часах), когда сети не было
+//                  вовсе. Это основной случай на часах без eSIM: речь
+//                  распознаёт шлюз, поэтому без сети текста взяться неоткуда,
+//                  и сохранить можно только звук.
+//
+// Записи живут в кэше приложения, и рантайм вправе их убрать. Поэтому у
+// звуковых элементов есть срок годности, а исчезнувший файл удаляется из
+// очереди, а не застревает в ней навсегда.
 
 var STORAGE_KEY = "pendingNotes"
 var MAX_QUEUE_SIZE = 50
+var AUDIO_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 var cache = []
 var counter = 0
@@ -26,12 +38,34 @@ function serialize(list) {
   }
 }
 
+// Старые элементы лежат без поля kind — считаем их текстовыми, чтобы
+// обновление приложения не потеряло то, что уже стоит в очереди.
+function normalizeItem(item) {
+  if (!item || typeof item !== "object") return null
+  if (!item.kind) item.kind = "text"
+  if (item.kind === "audio" && !item.uri) return null
+  if (item.kind === "text" && !item.text) return null
+  return item
+}
+
+function isFresh(item) {
+  if (item.kind !== "audio") return true
+  var created = Date.parse(item.createdAt)
+  if (!created) return true
+  return Date.now() - created < AUDIO_TTL_MS
+}
+
 function deserialize(raw) {
   if (!raw) return []
   try {
     var parsed = JSON.parse(raw)
-    if (Object.prototype.toString.call(parsed) === "[object Array]") return parsed
-    return []
+    if (Object.prototype.toString.call(parsed) !== "[object Array]") return []
+    var result = []
+    for (var i = 0; i < parsed.length; i++) {
+      var item = normalizeItem(parsed[i])
+      if (item && isFresh(item)) result.push(item)
+    }
+    return result
   } catch (error) {
     return []
   }
@@ -73,7 +107,23 @@ export function enqueue(text, done, fail, requestId) {
     if (done) done(cache)
     return
   }
-  var item = { id: makeId(), text: text, requestId: requestId || makeId(), createdAt: new Date().toISOString() }
+  push({ kind: "text", text: text, requestId: requestId || makeId() }, done, fail)
+}
+
+// Откладывает саму запись: сети нет, распознать некому, но голос человека
+// терять нельзя. requestId фиксируется здесь и переживает перезапуск, чтобы
+// повторная досылка не создала вторую заметку.
+export function enqueueAudio(uri, contentType, done, fail) {
+  if (!uri) {
+    if (done) done(cache)
+    return
+  }
+  push({ kind: "audio", uri: uri, contentType: contentType || "", requestId: makeId() }, done, fail)
+}
+
+function push(fields, done, fail) {
+  var item = { id: makeId(), createdAt: new Date().toISOString() }
+  Object.keys(fields).forEach(function(key) { item[key] = fields[key] })
   var next = cache.concat([item])
   if (next.length > MAX_QUEUE_SIZE) {
     next = next.slice(next.length - MAX_QUEUE_SIZE)
@@ -115,10 +165,11 @@ export function flush(sendOne, done) {
   }
   flushing = true
   var sent = 0
+  var dropped = 0
 
   function finish() {
     flushing = false
-    if (done) done(sent, cache.length)
+    if (done) done(sent, cache.length, dropped)
   }
 
   function step() {
@@ -127,20 +178,34 @@ export function flush(sendOne, done) {
       return
     }
     var item = cache[0]
-    sendOne(item, function() {
+
+    // drop — элемент отправить невозможно в принципе (файл записи пропал).
+    // Он убирается из очереди, и досылка идёт дальше: иначе один потерянный
+    // файл навсегда заблокировал бы всё, что стоит за ним.
+    function remove(counts, next) {
       var previous = cache
       removeFromCache(item.id)
-      sent += 1
+      if (counts) sent += 1
       persist(cache, function(ok) {
         if (ok === false) {
           cache = previous
-          sent -= 1
+          if (counts) sent -= 1
           finish()
           return
         }
-        step()
+        next()
       })
-    }, finish)
+    }
+
+    sendOne(
+      item,
+      function() { remove(true, step) },
+      finish,
+      function() {
+        dropped += 1
+        remove(false, step)
+      }
+    )
   }
 
   step()

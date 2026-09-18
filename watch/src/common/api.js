@@ -161,18 +161,22 @@ function filenameFor(contentType) {
 //
 // Провайдер передаётся в query-строке: у multipart-пути нет удобного места
 // для поля, а "auto" означает «как настроено на шлюзе».
-function withProvider(path, intent) {
+// preview=1 означает «распознай, но не сохраняй»: человек сначала видит
+// текст и подтверждает. Для отложенной заметки из офлайн-очереди это не
+// годится — она уходит позже, когда никто не смотрит на экран, поэтому там
+// preview выключается и заметка сохраняется сразу.
+function withProvider(path, intent, preview) {
   var params = []
   var provider = getCached().aiProvider
   if (provider && provider !== "auto") params.push("provider=" + provider)
   if (intent) params.push("intent=" + intent)
-  if (intent === "note") params.push("preview=1")
+  if (intent === "note" && preview) params.push("preview=1")
   return params.length ? path + "?" + params.join("&") : path
 }
 
 // Путь A: request.upload отправляет файл по uri как multipart/form-data.
 // Шлюз принимает multipart наравне с сырым телом.
-function uploadByUri(path, uri, contentType, intent, requestKey, done, fail) {
+function uploadByUri(path, uri, contentType, intent, requestKey, preview, done, fail) {
   // Проверено опросом рантайма: метода request.upload не существует.
   // Вызов несуществующей функции бросает исключение, поэтому проверяем явно,
   // а не полагаемся на колбэк ошибки. Путь оставлен на случай прошивки,
@@ -188,7 +192,7 @@ function uploadByUri(path, uri, contentType, intent, requestKey, done, fail) {
     fail({ message: "Отправка записи не ответила" })
   })
   request.upload({
-    url: baseUrl() + withProvider(path, intent),
+    url: baseUrl() + withProvider(path, intent, preview),
     method: "POST",
     header: uploadHeaders,
     files: [{
@@ -203,7 +207,7 @@ function uploadByUri(path, uri, contentType, intent, requestKey, done, fail) {
 }
 
 // Путь B: прочитать файл в память и отправить сырые байты.
-function uploadByBytes(path, uri, contentType, intent, requestKey, done, fail) {
+function uploadByBytes(path, uri, contentType, intent, requestKey, preview, done, fail) {
   var settle = guard(REQUEST_TIMEOUT_MS, function() {
     fail({ message: "Не удалось прочитать запись с часов" })
   })
@@ -213,7 +217,10 @@ function uploadByBytes(path, uri, contentType, intent, requestKey, done, fail) {
       var bytes = data && (data.buffer || data)
       var size = bytes ? (bytes.byteLength || bytes.length || 0) : 0
       if (!bytes) {
-        fail({ message: "Не удалось прочитать запись с часов" })
+        // Файл записи пропал — из кэша приложения его мог убрать рантайм.
+        // Для отложенной заметки это окончательный приговор: повторять
+        // нечего, поэтому помечаем ошибку как неустранимую.
+        fail({ message: "Запись не найдена на часах", gone: true })
         return
       }
       // Пустой файл отправлять бессмысленно: шлюз вернёт 400, а человек
@@ -222,16 +229,16 @@ function uploadByBytes(path, uri, contentType, intent, requestKey, done, fail) {
         fail({ message: "Ничего не записалось, попробуйте ещё раз", serverError: true })
         return
       }
-      sendAudioBytes(path, bytes, contentType, intent, requestKey, done, fail)
+      sendAudioBytes(path, bytes, contentType, intent, requestKey, preview, done, fail)
     }),
     fail: settle(function(error) { handleFail(error, fail) })
   })
 }
 
-function sendAudioBytes(path, audio, contentType, intent, requestKey, done, fail) {
+function sendAudioBytes(path, audio, contentType, intent, requestKey, preview, done, fail) {
   var requestHeaders = headers({ "Content-Type": contentType || "application/octet-stream", "Idempotency-Key": requestKey })
   callFetch({
-    url: baseUrl() + withProvider(path, intent),
+    url: baseUrl() + withProvider(path, intent, preview),
     method: "POST",
     header: requestHeaders,
     data: audio
@@ -242,17 +249,23 @@ function sendAudioBytes(path, audio, contentType, intent, requestKey, done, fail
 // На часах Wi-Fi поднимается по требованию, поэтому лишний круг стоит секунд.
 // done получает вторым аргументом имя сработавшего пути доставки файла
 // ("upload" | "bytes") — нужно для проверки на реальных часах.
-export function voiceUri(uri, contentType, intent, done, fail) {
+// options.preview === false — отправить заметку сразу, без промежуточного
+// подтверждения (досылка из офлайн-очереди).
+// options.requestKey — свой ключ идемпотентности: у отложенной записи он
+// сохраняется вместе с ней, поэтому повторная досылка после сбоя связи не
+// создаёт вторую заметку.
+export function voiceUri(uri, contentType, intent, done, fail, options) {
   var senders = {
     upload: uploadByUri,
     bytes: uploadByBytes
   }
   var preferred = getCached().transferMode === "upload" ? "upload" : "bytes"
   var other = preferred === "upload" ? "bytes" : "upload"
-  var requestKey = makeRequestKey("voice")
+  var requestKey = (options && options.requestKey) || makeRequestKey("voice")
+  var preview = !options || options.preview !== false
 
   function attempt(mode, onFail) {
-    senders[mode]("/api/v1/voice", uri, contentType, intent, requestKey, function(response) {
+    senders[mode]("/api/v1/voice", uri, contentType, intent, requestKey, preview, function(response) {
       rememberTransferMode(mode)
       done(response, mode)
     }, onFail)
@@ -261,7 +274,8 @@ export function voiceUri(uri, contentType, intent, done, fail) {
   // Сначала — способ, сработавший в прошлый раз: молчащий путь стоит целого
   // таймаута, а на голосовой команде это заметные секунды ожидания.
   attempt(preferred, function(error) {
-    if (error && error.serverError) {
+    // gone — файла записи больше нет; второй способ доставки его не воскресит.
+    if (error && (error.serverError || error.gone)) {
       fail(error)
       return
     }

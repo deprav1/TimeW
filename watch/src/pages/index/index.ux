@@ -60,7 +60,7 @@ import { recordAudio, stopRecording } from "../../common/audio"
 import { loadSettings, getCached } from "../../common/settings"
 import { speak } from "../../common/speech"
 import { isOnline } from "../../common/net"
-import { loadQueue, getQueued, enqueue, flush } from "../../common/queue"
+import { loadQueue, getQueued, enqueue, enqueueAudio, flush } from "../../common/queue"
 
 function messageFrom(error) {
   return error && error.message ? error.message : "Не удалось связаться со шлюзом"
@@ -173,11 +173,26 @@ export default {
 
   flushQueueNow() {
     var self = this
-    flush(function(item, onOk, onErr) {
+    flush(function(item, onOk, onErr, onDrop) {
+      if (item.kind === "audio") {
+        // preview выключен: подтверждать текст некому — досылка идёт фоном.
+        // Заметка появится в списке, откуда её можно удалить долгим нажатием.
+        voiceUri(item.uri, item.contentType, "note", function() { onOk() }, function(error) {
+          if (error && error.gone) onDrop()
+          else onErr()
+        }, { preview: false, requestKey: item.requestId })
+        return
+      }
       query("Запиши: " + item.text, function() { onOk() }, function() { onErr() }, item.requestId)
-    }, function(sentCount) {
+    }, function(sentCount, left, droppedCount) {
       self.updateQueueCount()
       if (sentCount > 0) self.refreshNotes()
+      // О потерянной записи надо сказать: человек считает, что заметка есть.
+      if (droppedCount > 0) {
+        self.errorText = droppedCount === 1
+          ? "Одна запись пропала с часов и не отправлена"
+          : droppedCount + " записи пропали с часов и не отправлены"
+      }
     })
   },
 
@@ -406,9 +421,16 @@ export default {
         self.applyResponse(response)
       }, function(error) {
         if (epoch !== self.voiceEpoch) return
+        self.setBusy(false)
+        // Заметку без сети терять нельзя: распознать её на часах некому,
+        // поэтому откладываем саму запись и отправим, когда сеть появится.
+        // Вопрос так отложить нельзя — ответ нужен сейчас, а не потом.
+        if (intent === "note" && !(error && error.serverError)) {
+          self.deferNote(audio, error)
+          return
+        }
         self.status = "ошибка"
         self.errorText = messageFrom(error)
-        self.setBusy(false)
       })
     }, function(error) {
       if (epoch !== self.voiceEpoch) return
@@ -416,6 +438,23 @@ export default {
       self.status = "готов"
       self.errorText = messageFrom(error)
       self.setBusy(false)
+    })
+  },
+
+  // Откладывает надиктованную заметку целиком, вместе со звуком.
+  deferNote(audio, error) {
+    var self = this
+    enqueueAudio(audio.uri, audio.contentType, function() {
+      self.updateQueueCount()
+      self.status = "готов"
+      self.result = "Заметка сохранена на часах"
+      self.showTitle = false
+      self.errorText = "Нет связи — отправлю, когда появится сеть"
+    }, function() {
+      // Даже отложить не вышло: честно говорим исходную ошибку, иначе
+      // человек уйдёт уверенным, что заметка сохранена.
+      self.status = "ошибка"
+      self.errorText = messageFrom(error)
     })
   },
 
