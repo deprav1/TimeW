@@ -328,3 +328,15 @@ export function confirmHome(confirmationToken, done, fail) {
     data: JSON.stringify({ confirmationToken: confirmationToken })
   }, REQUEST_TIMEOUT_MS, done, fail)
 }
+
+// Отчёт диагностики уходит на шлюз и попадает в его лог. Это единственный
+// способ увидеть состояние часов удалённо: экран оттуда не виден, а логи
+// рантайма Vela достаются только через телефон.
+export function sendDiagnostics(report, done, fail) {
+  callFetch({
+    url: baseUrl() + "/api/v1/diag",
+    method: "POST",
+    header: headers(),
+    data: JSON.stringify(report)
+  }, REQUEST_TIMEOUT_MS, done, fail)
+}

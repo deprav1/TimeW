@@ -44,7 +44,7 @@
     <text class="check-result" if="{{checkResult}}">{{checkResult}}</text>
     <text class="error-text" if="{{errorText}}">{{errorText}}</text>
 
-    <text class="note-line">Адрес и токен — из сборки (npm run setup)</text>
+    <text class="note-line" onclick="openDiag">Адрес и токен — из сборки. Нажмите для диагностики</text>
 
     <div class="action-row">
       <div class="small-button" onclick="checkConnection"><text class="small-label">Проверить связь</text></div>
@@ -270,6 +270,11 @@ export default {
     }, function(error) {
       self.errorText = messageFrom(error)
     })
+  },
+
+  // Диагностика вынесена отдельным экраном: она длинная, а нужна редко.
+  openDiag() {
+    router.push({ uri: "/pages/diag" })
   },
 
   goBack() {

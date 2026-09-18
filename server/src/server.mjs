@@ -1383,6 +1383,17 @@ async function route(req, res) {
   if (req.method === "POST" && pathname === "/api/v1/speak") return handleSpeak(req, res);
   const speechIdMatch = pathname.match(/^\/api\/v1\/speak\/([^/]+)$/);
   if (req.method === "GET" && speechIdMatch) return handleSpeakById(req, res, decodeURIComponent(speechIdMatch[1]));
+  // Отчёт диагностики с часов. Единственный способ увидеть, что происходит
+  // на устройстве: экрана оттуда не видно, а логи рантайма Vela достаются
+  // только через телефон. Часы присылают результаты своих проверок, шлюз
+  // пишет их одной строкой в лог — и её можно прочитать удалённо.
+  if (req.method === "POST" && pathname === "/api/v1/diag") {
+    const body = await jsonBody(req);
+    const report = JSON.stringify(body).slice(0, 4000);
+    console.log(`${new Date().toISOString()} DIAG ${report}`);
+    return json(res, 200, { ok: true, received: report.length, buildId: config.buildId });
+  }
+
   if (req.method === "POST" && pathname === "/api/v1/dialog/reset") {
     const cleared = await resetDialogHistory();
     return json(res, 200, { ok: true, cleared });

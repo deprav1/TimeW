@@ -1,0 +1,228 @@
+<template>
+  <div class="page">
+    <div class="topbar">
+      <text class="title">ДИАГНОСТИКА</text>
+      <text class="back" onclick="goBack">назад</text>
+    </div>
+
+    <div class="{{runClass}}" onclick="run">
+      <text class="run-label">{{runLabel}}</text>
+    </div>
+
+    <text class="hint" if="{{sentText}}">{{sentText}}</text>
+
+    <!-- Статический list-item без for в этой сборке Vela не рендерится,
+         поэтому строки отчёта тоже через for. -->
+    <list class="lines">
+      <list-item for="{{lines}}" class="line" type="line">
+        <text class="line-text">{{ $item.text }}</text>
+      </list-item>
+    </list>
+
+    <div class="action-row" if="{{hasReport}}">
+      <div class="small-button" onclick="send"><text class="small-label">Отправить отчёт</text></div>
+    </div>
+  </div>
+</template>
+
+<script>
+import router from "@system.router"
+import fetch from "@system.fetch"
+import record from "@system.record"
+import request from "@system.request"
+import prompt from "@system.prompt"
+import audio from "@system.audio"
+import file from "@system.file"
+import { loadSettings, getCached } from "../../common/settings"
+import { networkType } from "../../common/net"
+import { sendDiagnostics } from "../../common/api"
+import { CONFIG_STAMP } from "../../common/config"
+
+// Опрос рантайма: какие методы на самом деле есть на этой прошивке.
+// Именно так когда-то выяснилось, что prompt.show и request.upload
+// отсутствуют, — документация об этом умалчивает, а вызов несуществующего
+// метода не возвращает ошибку, а бросает исключение.
+function probe(name, module, methods) {
+  var present = []
+  var missing = []
+  methods.forEach(function(method) {
+    var exists = false
+    try { exists = module && typeof module[method] === "function" } catch (error) { exists = false }
+    if (exists) present.push(method)
+    else missing.push(method)
+  })
+  return { module: name, present: present, missing: missing }
+}
+
+export default {
+  private: {
+    lines: [],
+    runClass: "run-button",
+    runLabel: "Проверить всё",
+    busy: false,
+    hasReport: false,
+    sentText: "",
+    report: null
+  },
+
+  goBack() {
+    router.back()
+  },
+
+  add(text, value) {
+    // Копия массива, а не push: в этой сборке Vela изменение на месте
+    // не всегда перерисовывает список.
+    this.lines = this.lines.concat([{ text: text + ": " + value }])
+  },
+
+  run() {
+    var self = this
+    if (self.busy) return
+    self.busy = true
+    self.runClass = "run-busy"
+    self.runLabel = "Проверяю…"
+    self.lines = []
+    self.sentText = ""
+    self.hasReport = false
+
+    var report = {
+      startedAt: new Date().toISOString(),
+      build: CONFIG_STAMP,
+      modules: [
+        probe("record", record, ["start", "stop"]),
+        probe("request", request, ["upload", "download", "onDownloadComplete"]),
+        probe("prompt", prompt, ["show", "showDialog", "showToast"]),
+        probe("audio", audio, ["play", "pause", "stop"]),
+        probe("file", file, ["readArrayBuffer", "move", "delete", "writeArrayBuffer"])
+      ],
+      steps: []
+    }
+
+    report.modules.forEach(function(entry) {
+      self.add(entry.module, (entry.present.join(",") || "нет методов") + (entry.missing.length ? " | нет: " + entry.missing.join(",") : ""))
+    })
+
+    loadSettings(function(settings) {
+      report.gatewayUrl = settings.gatewayUrl || ""
+      report.hasToken = !!settings.deviceToken
+      self.add("адрес", report.gatewayUrl || "не задан")
+      self.add("токен", report.hasToken ? "задан" : "НЕ ЗАДАН")
+
+      networkType(function(type) {
+        report.network = type || "неизвестно"
+        self.add("сеть", report.network)
+        self.checkGateway(report)
+      })
+    })
+  },
+
+  // Проверяем два адреса по очереди: открытый /health и защищённый
+  // /api/v1/status. Так видно, что именно не сходится — сеть, адрес или
+  // токен. Раньше все три случая выглядели одинаково.
+  checkGateway(report) {
+    var self = this
+    var base = getCached().gatewayUrl || ""
+    if (!base) {
+      self.finish(report)
+      return
+    }
+
+    self.timedRequest(base + "/health", null, function(health) {
+      report.steps.push(health)
+      self.add("/health", health.status + " за " + health.ms + " мс" + (health.error ? " — " + health.error : ""))
+
+      var token = getCached().deviceToken
+      self.timedRequest(base + "/api/v1/status", token, function(status) {
+        report.steps.push(status)
+        self.add("/status", status.status + " за " + status.ms + " мс" + (status.error ? " — " + status.error : ""))
+        if (status.body) {
+          report.gatewayBuild = status.body.buildId
+          report.mode = status.body.mode
+          self.add("режим шлюза", String(status.body.mode))
+          self.add("озвучка", status.body.capabilities && status.body.capabilities.speech ? "есть" : "нет")
+          self.add("сборка шлюза", String(status.body.buildId || "").slice(0, 12))
+        }
+        self.finish(report)
+      })
+    })
+  },
+
+  timedRequest(url, token, done) {
+    var started = Date.now()
+    var finished = false
+    var settle = function(result) {
+      if (finished) return
+      finished = true
+      result.ms = Date.now() - started
+      result.url = url
+      done(result)
+    }
+    var timer = setTimeout(function() { settle({ status: 0, error: "нет ответа за 10 с" }) }, 10000)
+    var stop = function(result) { clearTimeout(timer); settle(result) }
+
+    try {
+      fetch.fetch({
+        url: url,
+        method: "GET",
+        header: token ? { "X-TimeW-Device-Token": token } : {},
+        success: function(response) {
+          var code = response && (response.code || response.statusCode) || 0
+          var body = null
+          try {
+            var raw = response && (response.data || response.body)
+            body = typeof raw === "string" ? JSON.parse(raw) : raw
+          } catch (error) { body = null }
+          stop({ status: code, body: body })
+        },
+        fail: function(error, code) {
+          stop({ status: code || 0, error: (error && error.message) || "ошибка запроса" })
+        }
+      })
+    } catch (error) {
+      stop({ status: 0, error: "вызов fetch не удался" })
+    }
+  },
+
+  finish(report) {
+    this.busy = false
+    this.runClass = "run-button"
+    this.runLabel = "Проверить ещё раз"
+    this.report = report
+    this.hasReport = true
+  },
+
+  // Отчёт уходит на шлюз и попадает в его лог: это единственный способ
+  // увидеть состояние часов, не пересылая скриншоты.
+  send() {
+    var self = this
+    if (!self.report) return
+    self.sentText = "отправляю…"
+    sendDiagnostics(self.report, function(response) {
+      self.sentText = "отчёт отправлен" + (response && response.buildId ? " (шлюз " + String(response.buildId).slice(0, 8) + ")" : "")
+    }, function(error) {
+      self.sentText = "не отправился: " + ((error && error.message) || "ошибка")
+    })
+  }
+}
+</script>
+
+<style>
+.page { flex-direction: column; align-items: center; background-color: #0b1020; padding-left: 36px; padding-right: 36px; padding-top: 16px; padding-bottom: 14px; }
+.topbar { flex-direction: row; justify-content: center; align-items: center; height: 24px; }
+.title { color: #7de3ff; font-size: 16px; font-weight: bold; }
+.back { color: #70d7ef; font-size: 16px; margin-left: 12px; }
+
+.run-button { width: 230px; height: 60px; border-radius: 30px; background-color: #2b9ec2; justify-content: center; align-items: center; margin-top: 10px; }
+.run-busy { width: 230px; height: 60px; border-radius: 30px; background-color: #1b5f75; justify-content: center; align-items: center; margin-top: 10px; }
+.run-label { color: #07111e; font-size: 19px; font-weight: bold; }
+
+.hint { color: #6f80a2; font-size: 13px; margin-top: 6px; text-align: center; width: 100%; lines: 2; text-overflow: ellipsis; }
+
+.lines { flex: 1; width: 100%; margin-top: 8px; }
+.line { margin-top: 4px; padding-left: 10px; padding-right: 10px; }
+.line-text { color: #eaf1ff; font-size: 13px; lines: 2; text-overflow: ellipsis; width: 100%; }
+
+.action-row { flex-direction: row; justify-content: center; margin-top: 8px; }
+.small-button { width: 190px; height: 40px; border-radius: 13px; background-color: #202b45; justify-content: center; align-items: center; }
+.small-label { color: #d9e6ff; font-size: 15px; }
+</style>
