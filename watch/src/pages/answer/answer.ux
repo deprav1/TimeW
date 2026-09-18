@@ -1,0 +1,59 @@
+<template>
+  <div class="page">
+    <div class="topbar">
+      <text class="brand">{{sourceLabel}}</text>
+      <text class="back" onclick="goBack">назад</text>
+    </div>
+    <!-- В этой версии Vela статический list-item не рендерится. Один
+         элемент тоже передаём через for, как на главном экране. -->
+    <list class="answer-list">
+      <list-item for="{{blocks}}" class="answer-item" type="answer">
+        <text class="answer-text">{{ $item.text }}</text>
+      </list-item>
+    </list>
+  </div>
+</template>
+
+<script>
+import router from "@system.router"
+
+function labelForSource(source) {
+  if (source === "ai") return "ОТВЕТ ИИ"
+  if (source === "note") return "ЗАМЕТКА"
+  if (source === "home") return "КОМАНДА"
+  if (!source) return "ОТВЕТ"
+  return String(source).toUpperCase()
+}
+
+export default {
+  protected: {
+    text: "",
+    source: ""
+  },
+
+  private: {
+    sourceLabel: "ОТВЕТ",
+    blocks: []
+  },
+
+  onInit() {
+    this.sourceLabel = labelForSource(this.source)
+    this.blocks = [{ text: this.text || "Пустой ответ" }]
+  },
+
+  goBack() {
+    router.back()
+  }
+}
+</script>
+
+<style>
+.page { flex-direction: column; background-color: #0b1020; padding-left: 22px; padding-right: 22px; padding-top: 14px; padding-bottom: 10px; }
+/* Круглый экран: панель собрана к центру, иначе углы срезают края. */
+.topbar { flex-direction: row; justify-content: center; align-items: center; height: 26px; }
+.brand { color: #7de3ff; font-size: 15px; font-weight: bold; }
+.back { color: #70d7ef; font-size: 13px; margin-left: 12px; padding-left: 6px; padding-right: 6px; }
+.answer-list { flex: 1; width: 100%; margin-top: 14px; }
+.answer-item { padding: 16px; padding-bottom: 34px; border-radius: 18px; background-color: #141d33; }
+.answer-text { color: #eaf1ff; font-size: 18px; }
+</style>

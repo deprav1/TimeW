@@ -1,0 +1,213 @@
+<template>
+  <div class="page">
+    <div class="topbar">
+      <text class="brand">НАСТРОЙКИ</text>
+      <text class="back" onclick="goBack">назад</text>
+    </div>
+
+    <!-- Четыре карточки в столбик не помещаются в 480px, а прокрутить их
+         нельзя: статический <list-item> в этой сборке Vela не рендерится
+         (проверено в эмуляторе). Поэтому компактные строки: вся строка —
+         кнопка, значение справа. -->
+    <!-- Адрес и токен нельзя ввести на часах: в рантайме Vela нет ни
+         prompt.show, ни элемента input (проверено опросом рантайма).
+         Поэтому они задаются в watch/src/common/config.js перед сборкой,
+         а здесь только показываются — чтобы видеть, куда стучится приложение. -->
+    <div class="row">
+      <text class="row-label">Шлюз</text>
+      <text class="row-value">{{gatewayUrl}}</text>
+    </div>
+
+    <div class="row">
+      <text class="row-label">Токен</text>
+      <text class="row-value">{{tokenDisplay}}</text>
+    </div>
+
+    <div class="row" onclick="toggleSpeak">
+      <text class="row-label">Озвучка</text>
+      <text class="row-value">{{speakDisplay}}</text>
+    </div>
+
+    <div class="row" onclick="cycleProvider">
+      <text class="row-label">Модель</text>
+      <text class="row-value">{{providerDisplay}}</text>
+    </div>
+
+    <text class="check-result" if="{{checkResult}}">{{checkResult}}</text>
+    <text class="error-text" if="{{errorText}}">{{errorText}}</text>
+
+    <text class="note-line">Адрес и токен задаются в config.js перед сборкой</text>
+
+    <div class="action-row">
+      <div class="small-button" onclick="checkConnection"><text class="small-label">Проверить связь</text></div>
+      <div class="small-button save-button" onclick="save"><text class="small-label">Сохранить</text></div>
+    </div>
+  </div>
+</template>
+
+<script>
+import router from "@system.router"
+import fetch from "@system.fetch"
+import { loadSettings, saveSettings } from "../../common/settings"
+
+function messageFrom(error) {
+  return error && error.message ? error.message : "Не удалось связаться со шлюзом"
+}
+
+function normalizeUrl(url) {
+  if (!url) return url
+  if (url.length > 0 && url.charAt(url.length - 1) === "/") {
+    return url.substring(0, url.length - 1)
+  }
+  return url
+}
+
+function labelForSpeak(enabled) {
+  return enabled ? "включено" : "выключено"
+}
+
+function labelForProvider(provider) {
+  if (provider === "gemini") return "Gemini"
+  if (provider === "openai") return "ChatGPT"
+  return "авто (как на шлюзе)"
+}
+
+function isValidUrl(url) {
+  if (!url) return false
+  return url.indexOf("http://") === 0 || url.indexOf("https://") === 0
+}
+
+function statusFrom(response) {
+  if (!response) return 0
+  if (typeof response.code === "number") return response.code
+  if (typeof response.statusCode === "number") return response.statusCode
+  return 0
+}
+
+function connectionError(status, parsed) {
+  if (status === 401) return "Неверный токен устройства"
+  if (status === 404) return "Шлюз найден, но путь /health недоступен"
+  if (status >= 400) return "Шлюз вернул ошибку " + status
+  if (parsed && parsed.ok === false) {
+    return parsed.error && parsed.error.message ? parsed.error.message : "Шлюз вернул ошибку"
+  }
+  return "Не удалось проверить шлюз"
+}
+
+export default {
+  private: {
+    gatewayUrl: "",
+    deviceToken: "",
+    tokenDisplay: "",
+    speakAnswers: false,
+    speakDisplay: "выключено",
+    aiProvider: "auto",
+    providerDisplay: "авто (как на шлюзе)",
+    checkResult: "",
+    errorText: ""
+  },
+
+  onInit() {
+    var self = this
+    loadSettings(function(settings) {
+      self.gatewayUrl = settings.gatewayUrl || ""
+      self.deviceToken = settings.deviceToken || ""
+      self.tokenDisplay = self.deviceToken ? "••••" + self.deviceToken.slice(-4) : "(не задан)"
+      self.speakAnswers = !!settings.speakAnswers
+      self.speakDisplay = labelForSpeak(self.speakAnswers)
+      self.aiProvider = settings.aiProvider || "auto"
+      self.providerDisplay = labelForProvider(self.aiProvider)
+    })
+  },
+
+  toggleSpeak() {
+    this.speakAnswers = !this.speakAnswers
+    this.speakDisplay = labelForSpeak(this.speakAnswers)
+  },
+
+  cycleProvider() {
+    var order = ["auto", "gemini", "openai"]
+    var index = order.indexOf(this.aiProvider)
+    this.aiProvider = order[(index + 1) % order.length]
+    this.providerDisplay = labelForProvider(this.aiProvider)
+  },
+
+  checkConnection() {
+    var self = this
+    if (!isValidUrl(self.gatewayUrl)) {
+      self.errorText = "Адрес должен начинаться с http:// или https://"
+      self.checkResult = ""
+      return
+    }
+    self.errorText = ""
+    self.checkResult = "проверяю…"
+    fetch.fetch({
+      url: normalizeUrl(self.gatewayUrl) + "/health",
+      method: "GET",
+      success: function(response) {
+        var raw = response && (response.data || response.body || response)
+        var parsed = raw
+        try {
+          parsed = typeof raw === "string" ? JSON.parse(raw) : raw
+        } catch (error) {
+          parsed = null
+        }
+        var status = statusFrom(response)
+        if ((status && status >= 400) || (parsed && parsed.ok === false) || !parsed) {
+          self.checkResult = ""
+          self.errorText = connectionError(status, parsed)
+          return
+        }
+        var mode = parsed && parsed.mode ? parsed.mode : "unknown"
+        self.checkResult = "шлюз на связи, режим " + mode
+      },
+      fail: function(error) {
+        self.checkResult = ""
+        self.errorText = messageFrom(error)
+      }
+    })
+  },
+
+  save() {
+    var self = this
+    if (!isValidUrl(self.gatewayUrl)) {
+      self.errorText = "Адрес должен начинаться с http:// или https://"
+      return
+    }
+    self.errorText = ""
+    saveSettings({
+      gatewayUrl: self.gatewayUrl,
+      deviceToken: self.deviceToken,
+      speakAnswers: self.speakAnswers,
+      aiProvider: self.aiProvider
+    }, function() {
+      router.back()
+    }, function(error) {
+      self.errorText = messageFrom(error)
+    })
+  },
+
+  goBack() {
+    router.back()
+  }
+}
+</script>
+
+<style>
+.page { flex-direction: column; background-color: #0b1020; padding-left: 22px; padding-right: 22px; padding-top: 14px; padding-bottom: 10px; }
+/* Круглый экран: у верхнего края круг узкий, поэтому панель собрана
+   к центру, а не растянута — иначе заголовок срезало бы углом. */
+.topbar { flex-direction: row; justify-content: center; align-items: center; height: 26px; }
+.brand { color: #7de3ff; font-size: 16px; font-weight: bold; }
+.back { color: #70d7ef; font-size: 13px; margin-left: 12px; padding-left: 6px; padding-right: 6px; }
+.row { flex-direction: row; align-items: center; justify-content: space-between; height: 46px; margin-top: 8px; padding-left: 14px; padding-right: 14px; border-radius: 14px; background-color: #141d33; }
+.row-label { color: #8fa7ca; font-size: 14px; }
+.row-value { color: #eaf1ff; font-size: 15px; margin-left: 10px; flex: 1; lines: 1; text-overflow: ellipsis; text-align: right; }
+.check-result { color: #7de3ff; font-size: 13px; margin-top: 12px; lines: 2; text-overflow: ellipsis; }
+.note-line { color: #5d6c8c; font-size: 11px; margin-top: 10px; lines: 2; }
+.error-text { color: #ff8f8f; font-size: 13px; margin-top: 8px; lines: 3; text-overflow: ellipsis; }
+.action-row { flex-direction: row; margin-top: 18px; justify-content: center; }
+.small-button { width: 145px; height: 42px; margin-left: 5px; margin-right: 5px; border-radius: 14px; background-color: #2b9ec2; justify-content: center; align-items: center; }
+.save-button { background-color: #2b9ec2; }
+.small-label { color: #07111e; font-size: 15px; font-weight: bold; }
+</style>

@@ -1,0 +1,68 @@
+{
+  "package": "com.timew.personal",
+  "name": "TimeW",
+  "versionName": "0.2.0",
+  "versionCode": 3,
+  "minPlatformVersion": 1000,
+  "icon": "/common/icon.png",
+  "deviceTypeList": [
+    "watch"
+  ],
+  "features": [
+    {
+      "name": "system.router"
+    },
+    {
+      "name": "system.fetch"
+    },
+    {
+      "name": "system.storage"
+    },
+    {
+      "name": "system.prompt"
+    },
+    {
+      "name": "system.vibrator"
+    },
+    {
+      "name": "system.record"
+    },
+    {
+      "name": "system.audio"
+    },
+    {
+      "name": "system.file"
+    },
+    {
+      "name": "system.request"
+    },
+    {
+      "name": "system.network"
+    }
+  ],
+  "config": {
+    "logLevel": "log",
+    "designWidth": 480,
+    "background": {
+      "features": [
+        "system.record",
+        "system.audio",
+        "system.request"
+      ]
+    }
+  },
+  "router": {
+    "entry": "pages/index",
+    "pages": {
+      "pages/index": {
+        "component": "index"
+      },
+      "pages/settings": {
+        "component": "settings"
+      },
+      "pages/answer": {
+        "component": "answer"
+      }
+    }
+  }
+}

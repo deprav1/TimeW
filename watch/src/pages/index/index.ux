@@ -1,0 +1,444 @@
+<template>
+  <div class="page">
+    <!-- Экран круглый: на высоте верхней панели круг сужается примерно до
+         200px, поэтому панель не растягивается на всю ширину, а собрана к
+         центру — иначе бренд и статус срезало бы углами. -->
+    <div class="topbar">
+      <text class="brand">TIMEW</text>
+      <text class="state" onclick="unstick">{{status}}</text>
+      <!-- Проверено в эмуляторе: глифа ⚙ в шрифте часов нет, рисовался
+           пустой квадрат. Поэтому настройки подписаны словом. -->
+      <text class="settings-icon" onclick="openSettings">настр.</text>
+    </div>
+
+    <!-- Проверено в эмуляторе: статический <list-item> без for в этой сборке
+         Vela не рендерится — экран оставался пустым. Поэтому шапка сделана
+         обычными div, а <list> используется только там, где есть for. -->
+    <div class="hero" onclick="openAnswer">
+      <text class="hero-title" if="{{showTitle}}">Личный помощник</text>
+      <text class="hero-heard" if="{{transcript}}">вы: {{transcript}}</text>
+      <text class="hero-result">{{result}}</text>
+    </div>
+    <text class="error-banner" if="{{errorText}}">{{errorText}}</text>
+    <text class="transfer-hint" if="{{transferMode}}">запись ушла способом: {{transferMode}}</text>
+    <text class="queue-hint" if="{{hasQueued}}">не отправлено: {{queuedCount}}</text>
+
+    <div class="main-actions">
+      <div class="{{talkClass}}" onclick="record">
+        <text class="talk-label">Нажми и говори</text>
+      </div>
+      <div class="action-row">
+        <div class="{{smallClass}}" onclick="recordNote"><text class="small-label">Заметка</text></div>
+        <div class="{{smallClass}}" onclick="resetDialogue"><text class="small-label">Забыть</text></div>
+      </div>
+    </div>
+
+    <div class="recent-header">
+      <text class="section-title">Заметки</text>
+      <text class="refresh" onclick="refreshNotes">обновить</text>
+    </div>
+    <text class="empty-notes" if="{{emptyNotes}}">Заметок пока нет</text>
+    <text class="notes-hint" if="{{hasNotes}}">удерживайте заметку, чтобы удалить</text>
+    <list class="notes-list">
+      <list-item for="{{notes}}" class="note-item" type="note" onlongpress="askDelete($item.id)">
+        <text class="note-text">{{ $item.text }}</text>
+        <text class="note-time">{{ $item.timeLabel }}</text>
+      </list-item>
+    </list>
+  </div>
+</template>
+
+<script>
+import prompt from "@system.prompt"
+import vibrator from "@system.vibrator"
+import router from "@system.router"
+import { query, listNotes, voiceUri, deleteNote, resetDialog } from "../../common/api"
+import { recordAudio } from "../../common/audio"
+import { loadSettings, getCached } from "../../common/settings"
+import { speak } from "../../common/speech"
+import { isOnline } from "../../common/net"
+import { loadQueue, getQueued, enqueue, flush } from "../../common/queue"
+
+function messageFrom(error) {
+  return error && error.message ? error.message : "Не удалось связаться со шлюзом"
+}
+
+function pad(value) {
+  return value < 10 ? "0" + value : "" + value
+}
+
+function formatTime(iso) {
+  if (!iso) return ""
+  var date = new Date(iso)
+  if (isNaN(date.getTime())) return ""
+  var now = new Date()
+  var hours = pad(date.getHours())
+  var minutes = pad(date.getMinutes())
+  var sameDay = date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate()
+  if (sameDay) {
+    return hours + ":" + minutes
+  }
+  var day = pad(date.getDate())
+  var month = pad(date.getMonth() + 1)
+  return day + "." + month + " " + hours + ":" + minutes
+}
+
+// kind приходит с сервера как "ai" / "note" / "home" — показывать эти слова
+// пользователю нельзя, статус читают люди, а не разработчики.
+function statusForKind(kind) {
+  if (kind === "note") return "записал"
+  if (kind === "home") return "дом"
+  return "готов"
+}
+
+function withTimeLabels(notes) {
+  return (notes || []).map(function(note) {
+    return {
+      id: note.id,
+      text: note.text,
+      createdAt: note.createdAt,
+      timeLabel: formatTime(note.createdAt)
+    }
+  })
+}
+
+export default {
+  private: {
+    status: "готов",
+    result: "Спросите что-нибудь",
+    errorText: "",
+    notes: [],
+    busy: false,
+    talkClass: "talk-button",
+    smallClass: "small-button",
+    notesBusy: false,
+    hasAnswer: false,
+    answerSource: "",
+    // Что услышали часы — показывается над ответом, чтобы при неверном
+    // распознавании было сразу видно, почему ответ странный.
+    transcript: "",
+    // Шаблоны держим на простых булевых полях: выражения вроде {{!transcript}}
+    // или {{notes.length}} в if разные сборки Vela трактуют по-разному, а
+    // приложение пока не проверено на устройстве.
+    showTitle: true,
+    hasNotes: false,
+    emptyNotes: true,
+    // Идентификатор озвучки последнего ответа, выдаётся шлюзом.
+    speechId: "",
+    // Какой способ доставки записи сработал на этой прошивке: "upload" или
+    // "bytes". Нужно для проверки на реальных часах, см. docs/physical-checklist.md
+    transferMode: "",
+    // Заметки, не ушедшие из-за отсутствия связи и ждущие досылки на часах.
+    queuedCount: 0,
+    hasQueued: false
+  },
+
+  onShow() {
+    var self = this
+    loadSettings(function() {
+      loadQueue(function() {
+        self.updateQueueCount()
+        self.refreshNotes()
+        self.flushQueue()
+      })
+    })
+  },
+
+  updateQueueCount() {
+    var queued = getQueued()
+    this.queuedCount = queued.length
+    this.hasQueued = queued.length > 0
+  },
+
+  // Досылка отложенных заметок молча, в фоне: не поднимает общий флаг busy,
+  // чтобы не блокировать пользователя, пока идёт попытка отправки старых
+  // заметок. Вызывается при onShow и после любого успешного запроса.
+  flushQueue() {
+    var self = this
+    isOnline(function(online) {
+      if (online) self.flushQueueNow()
+    })
+  },
+
+  flushQueueNow() {
+    var self = this
+    flush(function(item, onOk, onErr) {
+      query("Запиши: " + item.text, function() { onOk() }, function() { onErr() })
+    }, function(sentCount) {
+      self.updateQueueCount()
+      if (sentCount > 0) self.refreshNotes()
+    })
+  },
+
+  // Класс биндится целиком, а не склейкой "talk-button {{busyClass}}":
+  // в эмуляторе такая склейка давала кнопкам вид заблокированных даже
+  // в состоянии покоя.
+  setBusy(value) {
+    this.busy = value
+    this.talkClass = value ? "talk-busy" : "talk-button"
+    this.smallClass = value ? "small-busy" : "small-button"
+  },
+
+  // Диалогу таймаут не поставишь: человек может думать сколько угодно.
+  // Поэтому на случай, если системный диалог не открылся и не ответил,
+  // тап по статусу возвращает приложение в рабочее состояние.
+  unstick() {
+    if (!this.busy) return
+    this.setBusy(false)
+    this.status = "готов"
+    this.errorText = "Прервано вручную"
+  },
+
+  openSettings() {
+    router.push({ uri: "/pages/settings" })
+  },
+
+  openAnswer() {
+    if (!this.hasAnswer) return
+    router.push({
+      uri: "/pages/answer",
+      params: {
+        text: this.result,
+        source: this.answerSource
+      }
+    })
+  },
+
+  // Список заметок обновляется в фоне и НЕ поднимает общий флаг занятости:
+  // иначе при открытии приложения нажатие на «Нажми и говори» молча
+  // проглатывалось бы, пока грузится список.
+  refreshNotes() {
+    var self = this
+    if (self.notesBusy) return
+    self.notesBusy = true
+    listNotes(function(response) {
+      self.notes = withTimeLabels(response.notes)
+      self.hasNotes = self.notes.length > 0
+      self.emptyNotes = self.notes.length === 0
+      self.notesBusy = false
+    }, function(error) {
+      self.notesBusy = false
+      // Различаем «на часах нет сети» и «шлюз не отвечает»: иначе человек
+      // идёт править адрес шлюза, когда достаточно включить Wi-Fi.
+      isOnline(function(online) {
+        self.status = online ? "нет связи" : "нет сети"
+        self.errorText = online
+          ? messageFrom(error)
+          : "На часах нет сети. Включите Wi-Fi"
+      })
+    })
+  },
+
+  // Ввода текста на часах нет: проверено опросом рантайма — метода
+  // prompt.show не существует (есть только showToast и showDialog), и ни
+  // одно реальное Vela-приложение в образе не использует текстовый ввод.
+  // Поэтому и вопрос, и заметка надиктовываются голосом; разница лишь в
+  // том, что для заметки намерение передаётся шлюзу явно.
+  recordNote() {
+    this.startVoice("note")
+  },
+
+  // Сбрасывает память диалога на шлюзе, когда хочется начать разговор
+  // с чистого листа.
+  resetDialogue() {
+    var self = this
+    if (self.busy) return
+    self.setBusy(true)
+    resetDialog(function() {
+      self.setBusy(false)
+      self.status = "готов"
+      self.transcript = ""
+      self.showTitle = true
+      self.result = "Разговор начат заново"
+      self.hasAnswer = false
+      self.errorText = ""
+    }, function(error) {
+      self.setBusy(false)
+      self.status = "ошибка"
+      self.errorText = messageFrom(error)
+    })
+  },
+
+  // Общая обработка ответа шлюза: и для набранного текста, и для голоса.
+  applyResponse(response) {
+    this.status = statusForKind(response.kind)
+    this.result = response.text || "Готово"
+    this.errorText = ""
+    this.hasAnswer = !!response.text
+    this.answerSource = response.source || response.kind || ""
+    this.speechId = response.speechId || ""
+    if (response.kind === "note") this.refreshNotes()
+    vibrator.vibrate({ mode: "short" })
+    // Озвучиваем только если пользователь включил это в настройках:
+    // по умолчанию часы молчат и не тратят батарею на синтез.
+    if (this.speechId && getCached().speakAnswers) this.speakAnswer()
+  },
+
+  speakAnswer() {
+    var self = this
+    if (!self.speechId) return
+    speak(self.speechId, function() {}, function(error) {
+      self.errorText = messageFrom(error)
+    })
+  },
+
+  // noteText непустой только когда вызов пришёл из кнопки «Заметка» — именно
+  // по нему, а не по ответу сервера (которого при офлайне нет), решаем,
+  // можно ли отложить отправку в очередь при отсутствии связи. Обычные
+  // вопросы и домашние команды в очередь не попадают: ответ через час не
+  // нужен, а команду светом опасно выполнять задним числом.
+  sendText(text, noteText) {
+    var self = this
+    if (!text) {
+      self.setBusy(false)
+      return
+    }
+    self.setBusy(true)
+    self.status = "отправляю…"
+    self.transcript = ""
+    self.showTitle = true
+    query(text, function(response) {
+      self.setBusy(false)
+      self.applyResponse(response)
+      self.flushQueue()
+    }, function(error) {
+      self.setBusy(false)
+      if (noteText) {
+        enqueue(noteText, function() {
+          self.updateQueueCount()
+          self.status = "готов"
+          self.errorText = "Нет связи, заметка сохранена на часах"
+        })
+        return
+      }
+      self.status = "ошибка"
+      self.errorText = messageFrom(error)
+    })
+  },
+
+  record() {
+    this.startVoice("")
+  },
+
+  // intent="note" — шлюз сохранит распознанное как заметку независимо от
+  // формулировки; пустой intent — шлюз сам определит тип запроса.
+  startVoice(intent) {
+    var self = this
+    if (self.busy) return
+    self.setBusy(true)
+    self.errorText = ""
+    self.status = intent === "note" ? "диктуйте заметку…" : "слушаю…"
+    recordAudio(function(audio) {
+      self.status = "думаю…"
+      voiceUri(audio.uri, audio.contentType, intent, function(response, via) {
+        self.setBusy(false)
+        self.errorText = ""
+        self.transferMode = via
+        var recognized = response.transcript || ""
+        if (!recognized) {
+          self.status = "готов"
+          self.result = "Пустая запись"
+          return
+        }
+        self.transcript = recognized
+        self.showTitle = false
+        self.applyResponse(response)
+      }, function(error) {
+        self.status = "ошибка"
+        self.errorText = messageFrom(error)
+        self.setBusy(false)
+      })
+    }, function(error) {
+      self.status = "готов"
+      self.errorText = messageFrom(error)
+      self.setBusy(false)
+    })
+  },
+
+  askDelete(id) {
+    var self = this
+    if (self.busy) return
+    if (!id) return
+    var noteText = ""
+    for (var i = 0; i < self.notes.length; i++) {
+      if (self.notes[i].id === id) {
+        noteText = self.notes[i].text
+        break
+      }
+    }
+    prompt.showDialog({
+      title: "Удалить заметку?",
+      message: noteText,
+      buttons: [
+        { text: "Удалить" },
+        { text: "Отмена" }
+      ],
+      success: function(data) {
+        var index = data && typeof data.index === "number" ? data.index : -1
+        if (index === 0) {
+          self.performDelete(id)
+        }
+      },
+      cancel: function() {}
+    })
+  },
+
+  performDelete(id) {
+    var self = this
+    self.setBusy(true)
+    deleteNote(id, function() {
+      self.setBusy(false)
+      self.refreshNotes()
+      self.flushQueue()
+      vibrator.vibrate({ mode: "short" })
+    }, function(error) {
+      self.setBusy(false)
+      self.errorText = messageFrom(error)
+    })
+  }
+}
+</script>
+
+<style>
+.page { flex-direction: column; background-color: #0b1020; padding-left: 22px; padding-right: 22px; padding-top: 14px; padding-bottom: 10px; }
+.topbar { flex-direction: row; justify-content: center; align-items: center; height: 26px; }
+.brand { color: #7de3ff; font-size: 16px; font-weight: bold; }
+.state { color: #8392ad; font-size: 13px; margin-left: 10px; }
+.settings-icon { color: #8fa7ca; font-size: 17px; margin-left: 10px; padding-left: 6px; padding-right: 6px; }
+.notes-list { flex: 1; width: 100%; margin-top: 6px; }
+
+
+
+.hero { flex-direction: column; margin-top: 14px; padding: 16px; border-radius: 18px; background-color: #141d33; min-height: 76px; }
+.hero-title { color: #8fa7ca; font-size: 15px; }
+.hero-heard { color: #8fa7ca; font-size: 14px; lines: 2; text-overflow: ellipsis; }
+.hero-result { color: #ffffff; font-size: 22px; margin-top: 8px; lines: 3; text-overflow: ellipsis; }
+.hero-hint { color: #6f9fc2; font-size: 12px; margin-top: 6px; }
+.error-banner { color: #ff8f8f; font-size: 13px; margin-top: 10px; lines: 2; text-overflow: ellipsis; }
+.transfer-hint { color: #6f80a2; font-size: 12px; margin-top: 6px; lines: 1; text-overflow: ellipsis; }
+.queue-hint { color: #f2c94c; font-size: 12px; margin-top: 6px; lines: 1; text-overflow: ellipsis; }
+.main-actions { flex-direction: column; margin-top: 18px; align-items: center; }
+.talk-button { width: 310px; height: 74px; border-radius: 37px; background-color: #2b9ec2; flex-direction: row; justify-content: center; align-items: center; }
+/* Vela не поддерживает составные селекторы (.a.b) — такое правило
+   применялось ко ВСЕМ .talk-button, и кнопки всегда выглядели
+   заблокированными. Проверено в эмуляторе. Поэтому отдельные классы. */
+.talk-busy { flex-direction: row; width: 310px; height: 74px; border-radius: 37px; background-color: #1c4a5c; justify-content: center; align-items: center; }
+
+.talk-label { color: #07111e; font-size: 19px; font-weight: bold; }
+.action-row { flex-direction: row; margin-top: 12px; }
+.small-button { width: 145px; height: 42px; margin-left: 5px; margin-right: 5px; border-radius: 14px; background-color: #202b45; justify-content: center; align-items: center; }
+.small-busy { width: 145px; height: 42px; margin-left: 5px; margin-right: 5px; border-radius: 14px; background-color: #161e30; justify-content: center; align-items: center; }
+.small-label { color: #d9e6ff; font-size: 16px; }
+.recent-header { flex-direction: row; justify-content: space-between; align-items: center; margin-top: 22px; }
+.section-title { color: #b7c8e6; font-size: 15px; }
+/* Без явного размера текст рисовался шрифтом по умолчанию — вдвое крупнее
+   заголовка раздела. Проверено в эмуляторе. */
+.empty-notes { color: #6f80a2; font-size: 13px; margin-top: 8px; }
+.notes-hint { color: #5d6c8c; font-size: 11px; margin-top: 4px; }
+.refresh { color: #70d7ef; font-size: 13px; }
+.note-item { height: 37px; margin-top: 5px; padding-left: 12px; padding-right: 12px; border-radius: 11px; background-color: #141d33; flex-direction: row; justify-content: space-between; align-items: center; }
+.note-text { color: #eaf1ff; font-size: 16px; lines: 1; text-overflow: ellipsis; flex: 1; }
+.note-time { color: #6f80a2; font-size: 12px; margin-left: 8px; }
+</style>

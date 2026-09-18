@@ -1,0 +1,9 @@
+server/data/
+server/.env
+watch/node_modules/
+watch/dist/
+watch/build/
+server/node_modules/
+.temp_watch/
+.research-open-vela-docs/
+.claude/settings.local.json

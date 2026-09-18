@@ -1,0 +1,15 @@
+{
+  "name": "timew-watch",
+  "version": "0.2.0",
+  "private": true,
+  "engines": { "node": ">=8.10" },
+  "scripts": {
+    "start": "aiot start --watch",
+    "build": "aiot build",
+    "release": "aiot release"
+  },
+  "devDependencies": {
+    "@aiot-toolkit/jsc": "^1.0.3",
+    "aiot-toolkit": "^2.0.5"
+  }
+}
