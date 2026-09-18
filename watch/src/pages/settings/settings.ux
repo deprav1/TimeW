@@ -273,20 +273,23 @@ export default {
 </script>
 
 <style>
-.page { flex-direction: column; background-color: #0b1020; padding-left: 22px; padding-right: 22px; padding-top: 14px; padding-bottom: 10px; }
+/* Отступы по бокам крупные: на круглом экране у верхней и нижней строки
+   круг сужается примерно до 250px, и при 22px первую строку срезало —
+   видно на фотографии с устройства. */
+.page { flex-direction: column; background-color: #0b1020; padding-left: 38px; padding-right: 38px; padding-top: 18px; padding-bottom: 14px; }
 /* Круглый экран: у верхнего края круг узкий, поэтому панель собрана
    к центру, а не растянута — иначе заголовок срезало бы углом. */
 .topbar { flex-direction: row; justify-content: center; align-items: center; height: 26px; }
 .brand { color: #7de3ff; font-size: 16px; font-weight: bold; }
 .back { color: #70d7ef; font-size: 13px; margin-left: 12px; padding-left: 6px; padding-right: 6px; }
-.row { flex-direction: row; align-items: center; justify-content: space-between; height: 46px; margin-top: 8px; padding-left: 14px; padding-right: 14px; border-radius: 14px; background-color: #141d33; }
-.row-label { color: #8fa7ca; font-size: 14px; }
-.row-value { color: #eaf1ff; font-size: 15px; margin-left: 10px; flex: 1; lines: 1; text-overflow: ellipsis; text-align: right; }
-.check-result { color: #7de3ff; font-size: 13px; margin-top: 12px; lines: 2; text-overflow: ellipsis; }
-.note-line { color: #5d6c8c; font-size: 11px; margin-top: 10px; lines: 2; }
-.error-text { color: #ff8f8f; font-size: 13px; margin-top: 8px; lines: 3; text-overflow: ellipsis; }
-.action-row { flex-direction: row; margin-top: 18px; justify-content: center; }
-.small-button { width: 145px; height: 42px; margin-left: 5px; margin-right: 5px; border-radius: 14px; background-color: #2b9ec2; justify-content: center; align-items: center; }
+.row { flex-direction: row; align-items: center; justify-content: space-between; height: 42px; margin-top: 6px; padding-left: 12px; padding-right: 12px; border-radius: 12px; background-color: #141d33; }
+.row-label { color: #8fa7ca; font-size: 13px; }
+.row-value { color: #eaf1ff; font-size: 14px; margin-left: 10px; flex: 1; lines: 1; text-overflow: ellipsis; text-align: right; }
+.check-result { color: #7de3ff; font-size: 13px; margin-top: 10px; lines: 2; text-overflow: ellipsis; text-align: center; width: 100%; }
+.note-line { color: #5d6c8c; font-size: 11px; margin-top: 6px; lines: 1; text-overflow: ellipsis; text-align: center; width: 100%; }
+.error-text { color: #ff8f8f; font-size: 12px; margin-top: 6px; lines: 3; text-overflow: ellipsis; text-align: center; width: 100%; }
+.action-row { flex-direction: row; margin-top: 12px; justify-content: center; }
+.small-button { width: 130px; height: 40px; margin-left: 5px; margin-right: 5px; border-radius: 13px; background-color: #2b9ec2; justify-content: center; align-items: center; }
 .save-button { background-color: #2b9ec2; }
 .small-label { color: #07111e; font-size: 15px; font-weight: bold; }
 </style>

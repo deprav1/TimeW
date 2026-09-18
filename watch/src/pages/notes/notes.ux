@@ -1,0 +1,251 @@
+<template>
+  <div class="page">
+    <div class="topbar">
+      <text class="title">ЗАМЕТКИ</text>
+      <text class="back" onclick="goBack">назад</text>
+    </div>
+
+    <!-- Большая кнопка и здесь: диктовка — главное действие экрана,
+         а список нужен реже, чем кажется. -->
+    <div class="{{dictateClass}}" onclick="dictate">
+      <text class="dictate-label">{{dictateLabel}}</text>
+    </div>
+
+    <text class="hint" if="{{stale}}">список с прошлого раза</text>
+    <text class="hint" if="{{queuedCount}}">не отправлено: {{queuedCount}}</text>
+    <text class="error" if="{{errorText}}">{{errorText}}</text>
+    <text class="hint" if="{{emptyNotes}}">Заметок пока нет</text>
+
+    <!-- Статический list-item без for в этой сборке Vela не рендерится,
+         поэтому список только через for. -->
+    <list class="notes-list">
+      <list-item for="{{notes}}" class="note-item" type="note" onlongpress="askDelete($item.id)">
+        <text class="note-text">{{ $item.text }}</text>
+      </list-item>
+    </list>
+    <text class="hint" if="{{hasNotes}}">удерживайте, чтобы удалить</text>
+  </div>
+</template>
+
+<script>
+import prompt from "@system.prompt"
+import vibrator from "@system.vibrator"
+import router from "@system.router"
+import { listNotes, deleteNote, voiceUri, query } from "../../common/api"
+import { recordAudio, stopRecording } from "../../common/audio"
+import { isOnline } from "../../common/net"
+import { getQueued, enqueueAudio, loadQueue } from "../../common/queue"
+import { getCachedNotes, saveCachedNotes, loadCachedNotes } from "../../common/notes-cache"
+
+function messageFrom(error) {
+  return error && error.message ? error.message : "Не удалось связаться со шлюзом"
+}
+
+function texts(notes) {
+  return (notes || []).map(function(note) {
+    return { id: note.id, text: note.text }
+  })
+}
+
+export default {
+  private: {
+    notes: [],
+    hasNotes: false,
+    emptyNotes: false,
+    stale: false,
+    errorText: "",
+    queuedCount: 0,
+    busy: false,
+    dictateClass: "dictate-button",
+    dictateLabel: "Надиктовать",
+    voiceEpoch: 0,
+    recording: false
+  },
+
+  onShow() {
+    var self = this
+    loadCachedNotes(function(cached) {
+      if (cached) self.show(cached, true)
+      loadQueue(function() {
+        self.queuedCount = getQueued().length
+        self.refresh()
+      })
+    })
+  },
+
+  show(notes, stale) {
+    this.notes = texts(notes)
+    this.hasNotes = this.notes.length > 0
+    this.emptyNotes = this.notes.length === 0 && !stale
+    this.stale = stale && this.notes.length > 0
+  },
+
+  refresh() {
+    var self = this
+    listNotes(function(response) {
+      self.show(response.notes, false)
+      self.errorText = ""
+      saveCachedNotes(response.notes)
+    }, function(error) {
+      // Показанный из кэша список лучше пустого экрана: заметки никуда не
+      // делись, человек их уже видел.
+      var cached = getCachedNotes()
+      if (cached && cached.length > 0) {
+        self.show(cached, true)
+      } else {
+        self.errorText = messageFrom(error)
+      }
+    })
+  },
+
+  setBusy(value) {
+    this.busy = value
+    this.dictateClass = value ? "dictate-busy" : "dictate-button"
+  },
+
+  goBack() {
+    router.back()
+  },
+
+  dictate() {
+    var self = this
+    if (self.busy) {
+      // Аварийный размыкатель: диалогу таймаут не поставишь.
+      self.voiceEpoch += 1
+      if (self.recording) stopRecording()
+      self.recording = false
+      self.setBusy(false)
+      self.dictateLabel = "Надиктовать"
+      return
+    }
+    var epoch = self.voiceEpoch + 1
+    self.voiceEpoch = epoch
+    self.recording = true
+    self.setBusy(true)
+    self.errorText = ""
+    self.dictateLabel = "Слушаю"
+
+    recordAudio(function(audio) {
+      if (epoch !== self.voiceEpoch) return
+      self.recording = false
+      self.dictateLabel = "Думаю"
+      voiceUri(audio.uri, audio.contentType, "note", function(response) {
+        if (epoch !== self.voiceEpoch) return
+        self.setBusy(false)
+        self.dictateLabel = "Надиктовать"
+        self.confirmDraft(response.transcript || "")
+      }, function(error) {
+        if (epoch !== self.voiceEpoch) return
+        self.setBusy(false)
+        self.dictateLabel = "Надиктовать"
+        // Без сети распознать некому: откладываем саму запись, а не текст.
+        if (!(error && error.serverError)) {
+          self.defer(audio, error)
+          return
+        }
+        self.errorText = messageFrom(error)
+      })
+    }, function(error) {
+      if (epoch !== self.voiceEpoch) return
+      self.recording = false
+      self.setBusy(false)
+      self.dictateLabel = "Надиктовать"
+      self.errorText = messageFrom(error)
+    })
+  },
+
+  defer(audio, error) {
+    var self = this
+    enqueueAudio(audio.uri, audio.contentType, function() {
+      self.queuedCount = getQueued().length
+      self.errorText = "Нет связи — отправлю, когда появится сеть"
+    }, function() {
+      self.errorText = messageFrom(error)
+    })
+  },
+
+  // Распознанное показываем до сохранения: неверно расслышанная заметка
+  // хуже отсутствующей, потому что ей верят.
+  confirmDraft(text) {
+    var self = this
+    if (!text) {
+      self.errorText = "Ничего не расслышал"
+      return
+    }
+    prompt.showDialog({
+      title: "Сохранить заметку?",
+      message: text,
+      buttons: [{ text: "Сохранить" }, { text: "Отмена" }],
+      success: function(data) {
+        if (!data || data.index !== 0) return
+        self.save(text)
+      }
+    })
+  },
+
+  save(text) {
+    var self = this
+    self.setBusy(true)
+    var key = "timew-note-" + Date.now() + "-" + text.length
+    // Заметка уже подтверждена человеком, поэтому уходит обычным текстовым
+    // запросом — распознавать второй раз нечего.
+    var done = function() {
+      self.setBusy(false)
+      vibrator.vibrate({ mode: "short" })
+      self.refresh()
+    }
+    query("Запиши: " + text, done, function(error) {
+      self.setBusy(false)
+      self.errorText = messageFrom(error)
+    }, key)
+  },
+
+  askDelete(id) {
+    var self = this
+    if (self.busy || !id) return
+    var noteText = ""
+    for (var i = 0; i < self.notes.length; i++) {
+      if (self.notes[i].id === id) { noteText = self.notes[i].text; break }
+    }
+    prompt.showDialog({
+      title: "Удалить заметку?",
+      message: noteText,
+      buttons: [{ text: "Удалить" }, { text: "Отмена" }],
+      success: function(data) {
+        if (data && data.index === 0) self.performDelete(id)
+      }
+    })
+  },
+
+  performDelete(id) {
+    var self = this
+    self.setBusy(true)
+    deleteNote(id, function() {
+      self.setBusy(false)
+      vibrator.vibrate({ mode: "short" })
+      self.refresh()
+    }, function(error) {
+      self.setBusy(false)
+      self.errorText = messageFrom(error)
+    })
+  }
+}
+</script>
+
+<style>
+.page { flex-direction: column; align-items: center; background-color: #0b1020; padding-left: 40px; padding-right: 40px; padding-top: 16px; padding-bottom: 16px; }
+.topbar { flex-direction: row; justify-content: center; align-items: center; height: 24px; }
+.title { color: #7de3ff; font-size: 15px; font-weight: bold; }
+.back { color: #70d7ef; font-size: 13px; margin-left: 12px; }
+
+.dictate-button { width: 240px; height: 68px; border-radius: 34px; background-color: #2b9ec2; justify-content: center; align-items: center; margin-top: 10px; }
+.dictate-busy { width: 240px; height: 68px; border-radius: 34px; background-color: #1b5f75; justify-content: center; align-items: center; margin-top: 10px; }
+.dictate-label { color: #07111e; font-size: 19px; font-weight: bold; }
+
+.hint { color: #6f80a2; font-size: 12px; margin-top: 6px; text-align: center; width: 100%; lines: 1; text-overflow: ellipsis; }
+.error { color: #ff8f8f; font-size: 12px; margin-top: 6px; text-align: center; width: 100%; lines: 2; text-overflow: ellipsis; }
+
+.notes-list { flex: 1; width: 100%; margin-top: 8px; }
+.note-item { height: 44px; margin-top: 6px; padding-left: 14px; padding-right: 14px; border-radius: 12px; background-color: #141d33; align-items: center; }
+.note-text { color: #eaf1ff; font-size: 16px; lines: 1; text-overflow: ellipsis; width: 100%; }
+</style>
