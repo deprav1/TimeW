@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, createHmac, timingSafeEqual, randomUUID } from "node:crypto";
+import { createFileStore } from "./store.mjs";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const env = { ...process.env };
@@ -65,13 +66,22 @@ const config = {
 };
 const notesPath = join(config.dataDir, "notes.json");
 
+// По умолчанию — прежнее поведение: заметки в файле, короткие ключи в памяти.
+// setStore() подменяет хранилище при запуске на бесплатном хосте, где ни
+// диска, ни памяти между запросами нет (см. store.mjs и deno-entry.mjs).
+let store = createFileStore(config.dataDir);
+
+function setStore(next) {
+  store = next;
+}
+
 // Short-lived, bounded request-result cache. This protects the personal
 // gateway from duplicate notes/actions when a watch loses the HTTP response.
-const idempotencyStore = new Map();
 const IDEMPOTENCY_TTL_MS = 10 * 60 * 1000;
 const IDEMPOTENCY_MAX = 200;
-const confirmationStore = new Map();
 const CONFIRMATION_TTL_MS = 2 * 60 * 1000;
+const IDEMPOTENCY_PREFIX = "idem:";
+const CONFIRMATION_PREFIX = "confirm:";
 
 function requestId(req, body) {
   const value = req.headers["idempotency-key"] || req.headers["x-timew-request-id"] || body?.requestId;
@@ -89,14 +99,10 @@ function idempotencyFingerprint(scope, body) {
   return createHash("sha256").update(`${scope}:${JSON.stringify(body)}`).digest("hex");
 }
 
-function getIdempotent(key, fingerprint) {
+async function getIdempotent(key, fingerprint) {
   if (!key) return null;
-  const hit = idempotencyStore.get(key);
+  const hit = await store.kvGet(IDEMPOTENCY_PREFIX + key);
   if (!hit) return null;
-  if (Date.now() - hit.createdAt > IDEMPOTENCY_TTL_MS) {
-    idempotencyStore.delete(key);
-    return null;
-  }
   if (hit.fingerprint !== fingerprint) {
     const err = new Error("requestId was already used for a different request");
     err.statusCode = 409;
@@ -106,13 +112,19 @@ function getIdempotent(key, fingerprint) {
   return hit.response;
 }
 
-function putIdempotent(key, fingerprint, response) {
+async function putIdempotent(key, fingerprint, response) {
   if (!key) return;
-  idempotencyStore.set(key, { fingerprint, response, createdAt: Date.now() });
-  while (idempotencyStore.size > IDEMPOTENCY_MAX) idempotencyStore.delete(idempotencyStore.keys().next().value);
+  await store.kvSet(IDEMPOTENCY_PREFIX + key, { fingerprint, response }, IDEMPOTENCY_TTL_MS);
+  // Верхняя граница на всякий случай: срок годности и так чистит записи, но
+  // при шквале запросов за десять минут их может накопиться слишком много.
+  while ((await store.kvCount(IDEMPOTENCY_PREFIX)) > IDEMPOTENCY_MAX) {
+    const oldest = await store.kvOldest(IDEMPOTENCY_PREFIX);
+    if (!oldest) break;
+    await store.kvDelete(oldest);
+  }
 }
 
-function resetIdempotency() { idempotencyStore.clear(); }
+async function resetIdempotency() { await store.kvClear(IDEMPOTENCY_PREFIX); }
 
 function publicMode() {
   return config.provider === "mock" || !config.apiKey ? "demo" : "live";
@@ -174,33 +186,15 @@ async function jsonBody(req) {
   }
 }
 
+// Заметки и короткоживущие ключи живут в store — файл на диске при запуске
+// на своей машине, Deno KV на бесплатном хосте. Подробности и причина
+// разделения — в store.mjs.
 async function loadNotes() {
-  let raw;
-  try {
-    raw = await readFile(notesPath, "utf8");
-  } catch (cause) {
-    if (cause.code !== "ENOENT") throw cause;
-    return [];
-  }
-  try {
-    return JSON.parse(raw);
-  } catch (cause) {
-    console.error(`[${new Date().toISOString()}] notes.json повреждён, изолирую файл: ${cause.message}`);
-    const quarantinePath = `${notesPath}.corrupt.${Date.now()}`;
-    try {
-      await rename(notesPath, quarantinePath);
-    } catch (renameCause) {
-      console.error(`[${new Date().toISOString()}] не удалось изолировать повреждённый notes.json: ${renameCause.message}`);
-    }
-    return [];
-  }
+  return store.loadNotes();
 }
 
 async function saveNotes(notes) {
-  await mkdir(config.dataDir, { recursive: true });
-  const tmpPath = `${notesPath}.tmp`;
-  await writeFile(tmpPath, JSON.stringify(notes.slice(0, 50), null, 2) + "\n", "utf8");
-  await rename(tmpPath, notesPath);
+  return store.saveNotes(notes);
 }
 
 let notesQueue = Promise.resolve();
@@ -652,31 +646,37 @@ function demoTranscript() {
 // process can't grow this unboundedly; the real trimming (by DIALOG_TURNS
 // and DIALOG_TTL_MS) happens at read time so tests can mutate config on the
 // fly, same pattern as rateLimitMax/rateLimitWindowMs above.
-let dialogHistory = [];
 const DIALOG_HISTORY_HARD_CAP = 200;
+const DIALOG_KEY = "dialog";
 
-function recordDialogTurn(question, answer) {
-  dialogHistory.push({ question, answer, ts: Date.now() });
-  if (dialogHistory.length > DIALOG_HISTORY_HARD_CAP) {
-    dialogHistory.splice(0, dialogHistory.length - DIALOG_HISTORY_HARD_CAP);
-  }
+// История разговора тоже в store: без неё «Ещё вопрос» на часах каждый раз
+// начинал бы с чистого листа, а на бесплатном хосте память между запросами
+// не сохраняется.
+async function recordDialogTurn(question, answer) {
+  const history = (await store.kvGet(DIALOG_KEY)) || [];
+  history.push({ question, answer, ts: Date.now() });
+  const trimmed = history.length > DIALOG_HISTORY_HARD_CAP
+    ? history.slice(history.length - DIALOG_HISTORY_HARD_CAP)
+    : history;
+  await store.kvSet(DIALOG_KEY, trimmed);
 }
 
 // Returns the most recent turns, oldest first, filtered by TTL and capped
 // to config.dialogTurns — both read live so tests (and env changes) take
 // effect without restarting the process.
-function getDialogHistory() {
+async function getDialogHistory() {
+  const history = (await store.kvGet(DIALOG_KEY)) || [];
   const cutoff = Date.now() - config.dialogTtlMs;
-  const fresh = dialogHistory.filter((turn) => turn.ts >= cutoff);
+  const fresh = history.filter((turn) => turn.ts >= cutoff);
   return fresh.slice(-config.dialogTurns);
 }
 
 // Test-only export, mirrors resetRateLimit()/resetTuyaTokenCache(): lets a
 // test start a conversation from a clean slate, and backs the
 // POST /api/v1/dialog/reset endpoint.
-function resetDialogHistory() {
-  const cleared = dialogHistory.length;
-  dialogHistory = [];
+async function resetDialogHistory() {
+  const cleared = ((await store.kvGet(DIALOG_KEY)) || []).length;
+  await store.kvDelete(DIALOG_KEY);
   return cleared;
 }
 
@@ -697,15 +697,15 @@ function resetDialogHistory() {
 // limiter above, expired entries are pruned lazily on access so the process
 // (and tests) don't get an extra timer keeping them alive. Bounded to a
 // small cap so a chatty session can't grow this unboundedly.
-const speechRegistry = new Map();
 const SPEECH_REGISTRY_MAX = 50;
+const SPEECH_PREFIX = "speech:";
 
-function registerSpeech(text) {
+async function registerSpeech(text) {
   const id = randomUUID();
-  speechRegistry.set(id, { text, createdAt: Date.now() });
-  if (speechRegistry.size > SPEECH_REGISTRY_MAX) {
-    const oldestKey = speechRegistry.keys().next().value;
-    speechRegistry.delete(oldestKey);
+  await store.kvSet(SPEECH_PREFIX + id, { text }, config.speechTtlMs);
+  if ((await store.kvCount(SPEECH_PREFIX)) > SPEECH_REGISTRY_MAX) {
+    const oldest = await store.kvOldest(SPEECH_PREFIX);
+    if (oldest) await store.kvDelete(oldest);
   }
   return id;
 }
@@ -713,21 +713,16 @@ function registerSpeech(text) {
 // Returns the registered text for a still-fresh id, or null if the id is
 // unknown or has expired. Expired entries are deleted on the way out —
 // lazy cleanup, same pattern as checkRateLimit() above.
-function takeSpeechText(id) {
-  const entry = speechRegistry.get(id);
-  if (!entry) return null;
-  if (Date.now() - entry.createdAt > config.speechTtlMs) {
-    speechRegistry.delete(id);
-    return null;
-  }
-  return entry.text;
+async function takeSpeechText(id) {
+  const entry = await store.kvGet(SPEECH_PREFIX + id);
+  return entry ? entry.text : null;
 }
 
 // Test-only helper, mirrors resetRateLimit()/resetDialogHistory(): lets a
 // test start with an empty registry instead of leaking entries between
 // tests.
-function resetSpeechRegistry() {
-  speechRegistry.clear();
+async function resetSpeechRegistry() {
+  await store.kvClear(SPEECH_PREFIX);
 }
 
 function historyToOpenAIMessages(history) {
@@ -968,7 +963,7 @@ async function buildHomeCommandResult(command) {
 
   const token = randomUUID();
   const expiresAt = Date.now() + CONFIRMATION_TTL_MS;
-  confirmationStore.set(token, { command, deviceIds, expiresAt });
+  await store.kvSet(CONFIRMATION_PREFIX + token, { command, deviceIds }, CONFIRMATION_TTL_MS);
   return {
     ...base,
     text: "Команда подготовлена. Подтвердите выполнение.",
@@ -980,10 +975,11 @@ async function buildHomeCommandResult(command) {
 }
 
 async function confirmHomeCommand(token) {
-  const entry = confirmationStore.get(token);
+  const entry = await store.kvGet(CONFIRMATION_PREFIX + token);
   if (!entry) return null;
-  confirmationStore.delete(token);
-  if (Date.now() > entry.expiresAt) return null;
+  // Удаляем до исполнения: токен одноразовый, и повтор не должен зажечь свет
+  // второй раз, даже если первое исполнение упало.
+  await store.kvDelete(CONFIRMATION_PREFIX + token);
   return executeHomeCommand(entry.command, entry.deviceIds);
 }
 
@@ -1002,7 +998,7 @@ async function handleQuery(req, res, reqUrl) {
   const body = await jsonBody(req);
   const requestKey = requestId(req, body);
   const fingerprint = idempotencyFingerprint("query", body);
-  const cached = getIdempotent(requestKey, fingerprint);
+  const cached = await getIdempotent(requestKey, fingerprint);
   if (cached) return json(res, cached.status, cached.body);
   const text = normalizeText(body.text);
   if (!text) return error(res, 400, "text is required");
@@ -1012,21 +1008,21 @@ async function handleQuery(req, res, reqUrl) {
   const note = parseNote(text);
   if (note) {
     const result = await buildNoteResult(note);
-    putIdempotent(requestKey, fingerprint, { status: 200, body: result });
+    await putIdempotent(requestKey, fingerprint, { status: 200, body: result });
     return json(res, 200, result);
   }
   const command = parseHomeCommand(text);
   if (command) {
     const result = await buildHomeCommandResult(command);
-    putIdempotent(requestKey, fingerprint, { status: 200, body: result });
+    await putIdempotent(requestKey, fingerprint, { status: 200, body: result });
     return json(res, 200, result);
   }
-  const history = getDialogHistory();
+  const history = await getDialogHistory();
   const result = await providerChat(text, { provider, history });
-  recordDialogTurn(text, result.text);
-  const speechId = result.text ? registerSpeech(result.text) : undefined;
+  await recordDialogTurn(text, result.text);
+  const speechId = result.text ? await registerSpeech(result.text) : undefined;
   const response = { ok: true, kind: "ai", ...result, ...(speechId ? { speechId } : {}) };
-  putIdempotent(requestKey, fingerprint, { status: 200, body: response });
+  await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
   return json(res, 200, response);
 }
 
@@ -1053,7 +1049,7 @@ async function handleVoice(req, res, reqUrl) {
   const requestField = audio.isMultipart ? extractMultipartField(audio.raw, audio.requestType, "requestId") : undefined;
   const requestKey = requestId(req, { requestId: requestField, provider: providerParam || "auto", intent: intentParam || "", audio: audio.bytes.toString("base64") });
   const fingerprint = idempotencyFingerprint("voice", { provider: providerParam || "auto", intent: intentParam || "", audio: audio.bytes.toString("base64") });
-  const cached = getIdempotent(requestKey, fingerprint);
+  const cached = await getIdempotent(requestKey, fingerprint);
   if (cached) return json(res, cached.status, cached.body);
 
   // Gemini optimization: one call transcribes AND answers. Only safe to use
@@ -1062,32 +1058,32 @@ async function handleVoice(req, res, reqUrl) {
   // OUR result, and the model's answer is discarded, never surfaced or
   // acted on.
   if (provider === "gemini" && config.apiKey) {
-    const history = getDialogHistory();
+    const history = await getDialogHistory();
     const { transcript, answer } = await providerVoiceGemini(audio.bytes, audio.contentType, history);
 
     if (previewNote) {
       const response = { ok: true, kind: "draft", transcript, text: "Проверьте распознанную заметку", source: "gemini" };
-      putIdempotent(requestKey, fingerprint, { status: 200, body: response });
+      await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
       return json(res, 200, response);
     }
     const note = forceNote ? normalizeText(transcript) : parseNote(transcript);
     if (note) {
       const result = await buildNoteResult(note);
       const response = { ...result, transcript };
-      putIdempotent(requestKey, fingerprint, { status: 200, body: response });
+      await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
       return json(res, 200, response);
     }
     const command = parseHomeCommand(transcript);
     if (command) {
       const result = await buildHomeCommandResult(command);
       const response = { ...result, transcript };
-      putIdempotent(requestKey, fingerprint, { status: 200, body: response });
+      await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
       return json(res, 200, response);
     }
-    recordDialogTurn(transcript, answer);
-    const speechId = answer ? registerSpeech(answer) : undefined;
+    await recordDialogTurn(transcript, answer);
+    const speechId = answer ? await registerSpeech(answer) : undefined;
     const response = { ok: true, transcript, kind: "ai", text: answer, source: "gemini", ...(speechId ? { speechId } : {}) };
-    putIdempotent(requestKey, fingerprint, { status: 200, body: response });
+    await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
     return json(res, 200, response);
   }
 
@@ -1098,29 +1094,29 @@ async function handleVoice(req, res, reqUrl) {
 
   if (previewNote) {
     const response = { ok: true, kind: "draft", transcript, text: "Проверьте распознанную заметку", source: transcribed.source };
-    putIdempotent(requestKey, fingerprint, { status: 200, body: response });
+    await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
     return json(res, 200, response);
   }
   const note = forceNote ? normalizeText(transcript) : parseNote(transcript);
   if (note) {
     const result = await buildNoteResult(note);
     const response = { ...result, transcript };
-    putIdempotent(requestKey, fingerprint, { status: 200, body: response });
+    await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
     return json(res, 200, response);
   }
   const command = parseHomeCommand(transcript);
   if (command) {
     const result = await buildHomeCommandResult(command);
     const response = { ...result, transcript };
-    putIdempotent(requestKey, fingerprint, { status: 200, body: response });
+    await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
     return json(res, 200, response);
   }
-  const history = getDialogHistory();
+  const history = await getDialogHistory();
   const result = await providerChat(transcript, { provider, history });
-  recordDialogTurn(transcript, result.text);
-  const speechId = result.text ? registerSpeech(result.text) : undefined;
+  await recordDialogTurn(transcript, result.text);
+  const speechId = result.text ? await registerSpeech(result.text) : undefined;
   const response = { ok: true, transcript, kind: "ai", ...result, ...(speechId ? { speechId } : {}) };
-  putIdempotent(requestKey, fingerprint, { status: 200, body: response });
+  await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
   return json(res, 200, response);
 }
 
@@ -1195,7 +1191,7 @@ async function handleSpeak(req, res) {
 // audio/mpeg. This is what the watch's request.download hits — a plain URL,
 // with the device token in a header rather than the query string.
 async function handleSpeakById(req, res, id) {
-  const text = takeSpeechText(id);
+  const text = await takeSpeechText(id);
   if (text === null) {
     return error(res, 404, "Озвучка не найдена или устарела, запросите ответ заново", "not_found");
   }
@@ -1296,7 +1292,7 @@ async function route(req, res) {
   const speechIdMatch = pathname.match(/^\/api\/v1\/speak\/([^/]+)$/);
   if (req.method === "GET" && speechIdMatch) return handleSpeakById(req, res, decodeURIComponent(speechIdMatch[1]));
   if (req.method === "POST" && pathname === "/api/v1/dialog/reset") {
-    const cleared = resetDialogHistory();
+    const cleared = await resetDialogHistory();
     return json(res, 200, { ok: true, cleared });
   }
   if (req.method === "POST" && pathname === "/api/v1/transcribe") {
@@ -1393,5 +1389,6 @@ export {
   resetTuyaTokenCache,
   route,
   server,
+  setStore,
   SAFE_INSTANT_DEVICES
 };

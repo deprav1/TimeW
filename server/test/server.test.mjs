@@ -1004,8 +1004,8 @@ function geminiChatHandler(text) {
   };
 }
 
-test.beforeEach(() => {
-  resetDialogHistory();
+test.beforeEach(async () => {
+  await resetDialogHistory();
 });
 
 // --- /api/v1/voice ------------------------------------------------------------
@@ -1263,7 +1263,7 @@ test("dialog memory: a second query sees the first exchange in the provider's me
   const resetBody = await resetRes.json();
   assert.equal(resetBody.ok, true);
   assert.ok(resetBody.cleared >= 1);
-  assert.deepEqual(getDialogHistory(), []);
+  assert.deepEqual(await getDialogHistory(), []);
 });
 
 test("dialog memory: notes and home commands never enter the history", async () => {
@@ -1277,7 +1277,7 @@ test("dialog memory: notes and home commands never enter the history", async () 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text: "включи свет на кухне" })
   });
-  assert.deepEqual(getDialogHistory(), []);
+  assert.deepEqual(await getDialogHistory(), []);
 });
 
 test("dialog memory: a turn older than DIALOG_TTL_MS is not mixed into the context", async () => {
@@ -1289,12 +1289,12 @@ test("dialog memory: a turn older than DIALOG_TTL_MS is not mixed into the conte
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: "Первый вопрос" })
     });
-    assert.equal(getDialogHistory().length, 1);
+    assert.equal((await getDialogHistory()).length, 1);
     await new Promise((resolve) => setTimeout(resolve, 40));
-    assert.deepEqual(getDialogHistory(), [], "the stale turn must be filtered out by TTL");
+    assert.deepEqual(await getDialogHistory(), [], "the stale turn must be filtered out by TTL");
   } finally {
     config.dialogTtlMs = originalTtl;
-    resetDialogHistory();
+    await resetDialogHistory();
   }
 });
 
