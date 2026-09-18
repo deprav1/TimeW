@@ -23,6 +23,14 @@
       <text class="row-value">{{tokenDisplay}}</text>
     </div>
 
+    <!-- Тип сети решает вопрос архитектуры: если при выключенном Wi-Fi тут
+         «через телефон» и «Проверить связь» проходит, часам достаточно
+         телефона в кармане и шлюза в сети. -->
+    <div class="row" onclick="refreshNetwork">
+      <text class="row-label">Сеть</text>
+      <text class="row-value">{{networkDisplay}}</text>
+    </div>
+
     <div class="row" onclick="toggleSpeak">
       <text class="row-label">Озвучка</text>
       <text class="row-value">{{speakDisplay}}</text>
@@ -36,7 +44,7 @@
     <text class="check-result" if="{{checkResult}}">{{checkResult}}</text>
     <text class="error-text" if="{{errorText}}">{{errorText}}</text>
 
-    <text class="note-line">Адрес и токен задаются в config.js перед сборкой</text>
+    <text class="note-line">Адрес и токен — из сборки (npm run setup)</text>
 
     <div class="action-row">
       <div class="small-button" onclick="checkConnection"><text class="small-label">Проверить связь</text></div>
@@ -49,6 +57,15 @@
 import router from "@system.router"
 import fetch from "@system.fetch"
 import { loadSettings, saveSettings } from "../../common/settings"
+import { networkType } from "../../common/net"
+
+function labelForNetwork(type) {
+  if (!type) return "не определена"
+  if (type === "none") return "нет сети"
+  if (type === "wifi") return "Wi-Fi"
+  if (type === "bluetooth") return "через телефон"
+  return type
+}
 
 function messageFrom(error) {
   return error && error.message ? error.message : "Не удалось связаться со шлюзом"
@@ -104,11 +121,13 @@ export default {
     aiProvider: "auto",
     providerDisplay: "авто (как на шлюзе)",
     checkResult: "",
-    errorText: ""
+    errorText: "",
+    networkDisplay: "…"
   },
 
   onInit() {
     var self = this
+    self.refreshNetwork()
     loadSettings(function(settings) {
       self.gatewayUrl = settings.gatewayUrl || ""
       self.deviceToken = settings.deviceToken || ""
@@ -117,6 +136,14 @@ export default {
       self.speakDisplay = labelForSpeak(self.speakAnswers)
       self.aiProvider = settings.aiProvider || "auto"
       self.providerDisplay = labelForProvider(self.aiProvider)
+    })
+  },
+
+  refreshNetwork() {
+    var self = this
+    self.networkDisplay = "…"
+    networkType(function(type) {
+      self.networkDisplay = labelForNetwork(type)
     })
   },
 
