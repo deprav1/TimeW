@@ -11,7 +11,7 @@
          кнопка, значение справа. -->
     <!-- Адрес и токен нельзя ввести на часах: в рантайме Vela нет ни
          prompt.show, ни элемента input (проверено опросом рантайма).
-         Поэтому они задаются в watch/src/common/config.js перед сборкой,
+         Поэтому они приходят из сборки (npm run setup),
          а здесь только показываются — чтобы видеть, куда стучится приложение. -->
     <div class="row">
       <text class="row-label">Шлюз</text>
@@ -228,6 +228,12 @@ export default {
         var mode = parsed && parsed.mode ? parsed.mode : "unknown"
         // Главная строка проверки: видно, каким путём часы дошли до шлюза.
         self.checkResult = "связь есть (" + self.checkVia + "), режим " + mode
+        // Озвучка требует отдельного ключа на шлюзе. Без этой строки
+        // включённая «Озвучка» просто молчит, и понять почему нельзя.
+        var caps = parsed && parsed.capabilities
+        if (caps && caps.speech === false) {
+          self.errorText = "Озвучка не настроена на шлюзе (нужен TTS_API_KEY)"
+        }
       }),
       fail: settle(function(error) {
         self.checkResult = ""
@@ -280,16 +286,16 @@ export default {
 /* Круглый экран: у верхнего края круг узкий, поэтому панель собрана
    к центру, а не растянута — иначе заголовок срезало бы углом. */
 .topbar { flex-direction: row; justify-content: center; align-items: center; height: 26px; }
-.brand { color: #7de3ff; font-size: 16px; font-weight: bold; }
-.back { color: #70d7ef; font-size: 13px; margin-left: 12px; padding-left: 6px; padding-right: 6px; }
+.brand { color: #7de3ff; font-size: 17px; font-weight: bold; }
+.back { color: #70d7ef; font-size: 16px; margin-left: 12px; padding-left: 6px; padding-right: 6px; }
 .row { flex-direction: row; align-items: center; justify-content: space-between; height: 42px; margin-top: 6px; padding-left: 12px; padding-right: 12px; border-radius: 12px; background-color: #141d33; }
-.row-label { color: #8fa7ca; font-size: 13px; }
-.row-value { color: #eaf1ff; font-size: 14px; margin-left: 10px; flex: 1; lines: 1; text-overflow: ellipsis; text-align: right; }
-.check-result { color: #7de3ff; font-size: 13px; margin-top: 10px; lines: 2; text-overflow: ellipsis; text-align: center; width: 100%; }
-.note-line { color: #5d6c8c; font-size: 11px; margin-top: 6px; lines: 1; text-overflow: ellipsis; text-align: center; width: 100%; }
-.error-text { color: #ff8f8f; font-size: 12px; margin-top: 6px; lines: 3; text-overflow: ellipsis; text-align: center; width: 100%; }
+.row-label { color: #8fa7ca; font-size: 15px; }
+.row-value { color: #eaf1ff; font-size: 15px; margin-left: 10px; flex: 1; lines: 1; text-overflow: ellipsis; text-align: right; }
+.check-result { color: #7de3ff; font-size: 15px; margin-top: 10px; lines: 2; text-overflow: ellipsis; text-align: center; width: 100%; }
+.note-line { color: #5d6c8c; font-size: 13px; margin-top: 6px; lines: 1; text-overflow: ellipsis; text-align: center; width: 100%; }
+.error-text { color: #ff8f8f; font-size: 14px; margin-top: 6px; lines: 3; text-overflow: ellipsis; text-align: center; width: 100%; }
 .action-row { flex-direction: row; margin-top: 12px; justify-content: center; }
 .small-button { width: 130px; height: 40px; margin-left: 5px; margin-right: 5px; border-radius: 13px; background-color: #2b9ec2; justify-content: center; align-items: center; }
 .save-button { background-color: #2b9ec2; }
-.small-label { color: #07111e; font-size: 15px; font-weight: bold; }
+.small-label { color: #07111e; font-size: 16px; font-weight: bold; }
 </style>

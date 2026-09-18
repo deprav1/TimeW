@@ -133,12 +133,30 @@ export default {
     })
   },
 
+  // Первое нажатие начинает запись, второе — заканчивает её.
+  //
+  // Раньше запись всегда длилась фиксированные десять секунд: часы не знают,
+  // что человек договорил, и он стоял перед экраном, ожидая непонятно чего.
+  // Повторное нажатие тогда отменяло всё целиком — худшее из поведений.
   talk() {
+    if (this.recording) {
+      this.finishRecording()
+      return
+    }
     if (this.busy) {
       this.unstick()
       return
     }
     this.startVoice("")
+  },
+
+  finishRecording() {
+    this.recording = false
+    this.status = "думаю…"
+    this.talkLabel = "Думаю"
+    // record.stop() завершает запись, и рантайм отдаёт файл в тот же
+    // success-колбэк, что и по истечении времени.
+    stopRecording()
   },
 
   startVoice(intent) {
@@ -150,8 +168,9 @@ export default {
     self.setBusy(true)
     self.errorText = ""
     self.transcript = ""
-    self.status = "слушаю…"
-    self.talkLabel = "Слушаю"
+    self.status = "говорите"
+    self.talkLabel = "Готово"
+    self.result = "Нажмите, когда договорите"
 
     recordAudio(function(audio) {
       if (epoch !== self.voiceEpoch) return
@@ -271,11 +290,11 @@ export default {
 }
 
 /* Статус — он же аварийный размыкатель: тап снимает залипшее состояние. */
-.status { color: #7de3ff; font-size: 14px; height: 20px; text-align: center; }
+.status { color: #7de3ff; font-size: 17px; height: 20px; text-align: center; }
 
 .answer-area { flex-direction: column; align-items: center; width: 100%; height: 132px; margin-top: 4px; }
-.heard { color: #6f9fc2; font-size: 13px; lines: 1; text-overflow: ellipsis; text-align: center; width: 100%; }
-.answer { color: #ffffff; font-size: 21px; lines: 4; text-overflow: ellipsis; text-align: center; width: 100%; margin-top: 4px; }
+.heard { color: #6f9fc2; font-size: 15px; lines: 1; text-overflow: ellipsis; text-align: center; width: 100%; }
+.answer { color: #ffffff; font-size: 24px; lines: 4; text-overflow: ellipsis; text-align: center; width: 100%; margin-top: 4px; }
 
 /* 200×200 — палец попадает не глядя. Составные селекторы в этой сборке Vela
    не работают, поэтому у занятого состояния отдельный самостоятельный класс,
@@ -292,12 +311,12 @@ export default {
   justify-content: center; align-items: center;
   margin-top: 6px;
 }
-.talk-label { color: #07111e; font-size: 22px; font-weight: bold; text-align: center; }
+.talk-label { color: #07111e; font-size: 25px; font-weight: bold; text-align: center; }
 
-.error { color: #ff8f8f; font-size: 12px; margin-top: 6px; lines: 2; text-align: center; width: 100%; text-overflow: ellipsis; }
+.error { color: #ff8f8f; font-size: 14px; margin-top: 6px; lines: 2; text-align: center; width: 100%; text-overflow: ellipsis; }
 
 /* Нижний ряд стоит там, где круг уже сузился примерно до 265px, поэтому
    подписи короткие и с запасом по краям. */
 .bottom-row { flex-direction: row; justify-content: center; align-items: center; margin-top: 8px; height: 26px; }
-.link { color: #70d7ef; font-size: 14px; padding-left: 10px; padding-right: 10px; }
+.link { color: #70d7ef; font-size: 17px; padding-left: 10px; padding-right: 10px; }
 </style>

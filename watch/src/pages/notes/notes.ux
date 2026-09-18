@@ -109,11 +109,17 @@ export default {
 
   dictate() {
     var self = this
-    if (self.busy) {
-      // Аварийный размыкатель: диалогу таймаут не поставишь.
-      self.voiceEpoch += 1
-      if (self.recording) stopRecording()
+    // Идёт запись — значит нажатие означает «я договорил»: заканчиваем и
+    // отправляем, а не отменяем.
+    if (self.recording) {
       self.recording = false
+      self.dictateLabel = "Думаю"
+      stopRecording()
+      return
+    }
+    if (self.busy) {
+      // Аварийный размыкатель на случай, если рантайм молчит.
+      self.voiceEpoch += 1
       self.setBusy(false)
       self.dictateLabel = "Надиктовать"
       return
@@ -123,7 +129,7 @@ export default {
     self.recording = true
     self.setBusy(true)
     self.errorText = ""
-    self.dictateLabel = "Слушаю"
+    self.dictateLabel = "Готово"
 
     recordAudio(function(audio) {
       if (epoch !== self.voiceEpoch) return
@@ -235,17 +241,17 @@ export default {
 <style>
 .page { flex-direction: column; align-items: center; background-color: #0b1020; padding-left: 40px; padding-right: 40px; padding-top: 16px; padding-bottom: 16px; }
 .topbar { flex-direction: row; justify-content: center; align-items: center; height: 24px; }
-.title { color: #7de3ff; font-size: 15px; font-weight: bold; }
-.back { color: #70d7ef; font-size: 13px; margin-left: 12px; }
+.title { color: #7de3ff; font-size: 17px; font-weight: bold; }
+.back { color: #70d7ef; font-size: 16px; margin-left: 12px; }
 
 .dictate-button { width: 240px; height: 68px; border-radius: 34px; background-color: #2b9ec2; justify-content: center; align-items: center; margin-top: 10px; }
 .dictate-busy { width: 240px; height: 68px; border-radius: 34px; background-color: #1b5f75; justify-content: center; align-items: center; margin-top: 10px; }
-.dictate-label { color: #07111e; font-size: 19px; font-weight: bold; }
+.dictate-label { color: #07111e; font-size: 22px; font-weight: bold; }
 
-.hint { color: #6f80a2; font-size: 12px; margin-top: 6px; text-align: center; width: 100%; lines: 1; text-overflow: ellipsis; }
-.error { color: #ff8f8f; font-size: 12px; margin-top: 6px; text-align: center; width: 100%; lines: 2; text-overflow: ellipsis; }
+.hint { color: #6f80a2; font-size: 14px; margin-top: 6px; text-align: center; width: 100%; lines: 1; text-overflow: ellipsis; }
+.error { color: #ff8f8f; font-size: 14px; margin-top: 6px; text-align: center; width: 100%; lines: 2; text-overflow: ellipsis; }
 
 .notes-list { flex: 1; width: 100%; margin-top: 8px; }
 .note-item { height: 44px; margin-top: 6px; padding-left: 14px; padding-right: 14px; border-radius: 12px; background-color: #141d33; align-items: center; }
-.note-text { color: #eaf1ff; font-size: 16px; lines: 1; text-overflow: ellipsis; width: 100%; }
+.note-text { color: #eaf1ff; font-size: 18px; lines: 1; text-overflow: ellipsis; width: 100%; }
 </style>

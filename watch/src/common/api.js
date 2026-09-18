@@ -72,9 +72,12 @@ function handleResponse(response, done, fail) {
   // в этом случае бессмысленно: вторая попытка получит тот же отказ, а
   // пользователь лишний раз прождёт таймаут.
   if (body && body.ok === false) {
+    // Сообщение шлюза важнее нашего обобщённого: оно объясняет причину
+    // (например, что не настроена озвучка), а по коду состояния этого не
+    // видно — там просто «сервис недоступен».
     var serverMessage = body.error && body.error.message
     fail({
-      message: messageForStatus(status) || serverMessage || "Сервер вернул ошибку",
+      message: serverMessage || messageForStatus(status) || "Сервер вернул ошибку",
       code: body.error && body.error.code,
       serverError: true
     })
@@ -265,28 +268,43 @@ export function voiceUri(uri, contentType, intent, done, fail, options) {
     upload: uploadByUri,
     bytes: uploadByBytes
   }
-  var preferred = getCached().transferMode === "upload" ? "upload" : "bytes"
-  var other = preferred === "upload" ? "bytes" : "upload"
   var requestKey = (options && options.requestKey) || makeRequestKey("voice")
   var preview = !options || options.preview !== false
 
-  function attempt(mode, onFail) {
+  // Способы доставки записи, доступные на этой прошивке. request.upload на
+  // Watch S5 отсутствует (проверено опросом рантайма), и раньше он всё равно
+  // числился запасным путём — поэтому при любой неудаче человек видел
+  // «Отправка файлом не поддерживается» вместо настоящей причины.
+  var available = ["bytes"]
+  if (request && typeof request.upload === "function") available.push("upload")
+  var preferred = getCached().transferMode === "upload" && available.indexOf("upload") >= 0 ? "upload" : "bytes"
+  var order = [preferred].concat(available.filter(function(mode) { return mode !== preferred }))
+
+  function attempt(index, firstError) {
+    if (index >= order.length) {
+      // Сообщаем ошибку первой попытки: она о сути дела, а не о том, что
+      // запасной путь тоже не сработал.
+      fail(firstError || { message: "Не удалось отправить запись" })
+      return
+    }
+    var mode = order[index]
     senders[mode]("/api/v1/voice", uri, contentType, intent, requestKey, preview, function(response) {
       rememberTransferMode(mode)
       done(response, mode)
-    }, onFail)
+    }, function(error) {
+      // Отказ шлюза и пропавший файл повторять нечем: второй способ доставки
+      // получит тот же ответ, а человек лишний раз подождёт таймаут.
+      if (error && (error.serverError || error.gone)) {
+        fail(error)
+        return
+      }
+      attempt(index + 1, firstError || error)
+    })
   }
 
   // Сначала — способ, сработавший в прошлый раз: молчащий путь стоит целого
   // таймаута, а на голосовой команде это заметные секунды ожидания.
-  attempt(preferred, function(error) {
-    // gone — файла записи больше нет; второй способ доставки его не воскресит.
-    if (error && (error.serverError || error.gone)) {
-      fail(error)
-      return
-    }
-    attempt(other, fail)
-  })
+  attempt(0, null)
 }
 
 export function resetDialog(done, fail) {
