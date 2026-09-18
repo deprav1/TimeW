@@ -41,6 +41,7 @@
     <text class="loading-notes" if="{{notesLoading}}">Загружаю заметки…</text>
     <text class="empty-notes" if="{{emptyNotes}}">Заметок пока нет</text>
     <text class="notes-error" if="{{notesError}}">{{notesError}}</text>
+    <text class="notes-stale" if="{{notesStale}}">список с прошлого раза, шлюз недоступен</text>
     <text class="notes-hint" if="{{hasNotes}}">удерживайте заметку, чтобы удалить</text>
     <list class="notes-list">
       <list-item for="{{notes}}" class="note-item" type="note" onlongpress="askDelete($item.id)">
@@ -61,6 +62,7 @@ import { loadSettings, getCached } from "../../common/settings"
 import { speak } from "../../common/speech"
 import { isOnline } from "../../common/net"
 import { loadQueue, getQueued, enqueue, enqueueAudio, flush } from "../../common/queue"
+import { loadCachedNotes, getCachedNotes, saveCachedNotes } from "../../common/notes-cache"
 
 function messageFrom(error) {
   return error && error.message ? error.message : "Не удалось связаться со шлюзом"
@@ -139,6 +141,8 @@ export default {
     showSetup: true,
     notesLoading: false,
     notesError: "",
+    // Список показан из кэша: шлюз недоступен, данные могут быть несвежими.
+    notesStale: false,
     voiceEpoch: 0,
     recording: false
   },
@@ -147,10 +151,15 @@ export default {
     var self = this
     loadSettings(function() {
       self.showSetup = !getCached().gatewayUrl || !getCached().deviceToken
-      loadQueue(function() {
-        self.updateQueueCount()
-        self.refreshNotes()
-        self.flushQueue()
+      // Сначала показываем то, что уже знаем: список появляется сразу, не
+      // дожидаясь шлюза, а без сети остаётся единственным, что человек видит.
+      loadCachedNotes(function(cached) {
+        if (cached) self.showNotes(cached, true)
+        loadQueue(function() {
+          self.updateQueueCount()
+          self.refreshNotes()
+          self.flushQueue()
+        })
       })
     })
   },
@@ -245,15 +254,23 @@ export default {
     self.emptyNotes = false
     self.notesError = ""
     listNotes(function(response) {
-      self.notes = withTimeLabels(response.notes)
-      self.hasNotes = self.notes.length > 0
-      self.emptyNotes = self.notes.length === 0
+      self.showNotes(response.notes, false)
       self.notesBusy = false
       self.notesLoading = false
+      saveCachedNotes(response.notes)
     }, function(error) {
       self.notesBusy = false
       self.notesLoading = false
-      self.notesError = "Не удалось загрузить заметки"
+      // Список, показанный из кэша, лучше пустого экрана с ошибкой: заметки
+      // человек уже видел, они никуда не делись. Поэтому «не удалось
+      // загрузить» пишем только когда показывать действительно нечего.
+      var cached = getCachedNotes()
+      if (cached && cached.length > 0) {
+        self.showNotes(cached, true)
+        self.notesError = ""
+      } else {
+        self.notesError = "Не удалось загрузить заметки"
+      }
       // Различаем «на часах нет сети» и «шлюз не отвечает»: иначе человек
       // идёт править адрес шлюза, когда достаточно включить Wi-Fi.
       isOnline(function(online) {
@@ -263,6 +280,16 @@ export default {
           : "На часах нет сети. Включите Wi-Fi"
       })
     })
+  },
+
+  // stale — список показан из кэша, то есть может быть несвежим. Об этом
+  // говорим прямо: молча показанный старый список хуже отсутствия списка,
+  // потому что ему верят.
+  showNotes(notes, stale) {
+    this.notes = withTimeLabels(notes)
+    this.hasNotes = this.notes.length > 0
+    this.emptyNotes = this.notes.length === 0 && !stale
+    this.notesStale = stale && this.notes.length > 0
   },
 
   // Ввода текста на часах нет: проверено опросом рантайма — метода
@@ -563,6 +590,7 @@ export default {
 .setup-banner { color: #f2c94c; font-size: 13px; margin-top: 8px; lines: 2; text-overflow: ellipsis; }
 .loading-notes { color: #8fa7ca; font-size: 13px; margin-top: 8px; }
 .notes-error { color: #ff8f8f; font-size: 13px; margin-top: 8px; lines: 2; text-overflow: ellipsis; }
+.notes-stale { color: #b08a3a; font-size: 11px; margin-top: 4px; lines: 1; text-overflow: ellipsis; }
 .transfer-hint { color: #6f80a2; font-size: 12px; margin-top: 6px; lines: 1; text-overflow: ellipsis; }
 .queue-hint { color: #f2c94c; font-size: 12px; margin-top: 6px; lines: 1; text-overflow: ellipsis; }
 .main-actions { flex-direction: column; margin-top: 18px; align-items: center; }
