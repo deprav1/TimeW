@@ -1565,3 +1565,106 @@ test("GET /api/v1/speak/:id without a device token is rejected once a token is c
   // the point of this test is only that auth is enforced before that check.
   assert.equal(withHeader.status, 503);
 });
+
+// --- Озвучка через Gemini ------------------------------------------------
+//
+// Смысл этих проверок: озвучка должна работать тем же ключом, что и ответы,
+// а сырые сэмплы от Gemini — превращаться в файл, который часы смогут
+// проиграть. Без контейнера WAV звук не воспроизводится нигде.
+
+test("озвучка через Gemini идёт тем же ключом и возвращает WAV", async (t) => {
+  let requestedPath = null;
+  let sentBody = null;
+  // 2400 сэмплов тишины — достаточно, чтобы проверить заголовок и длину.
+  const pcm = Buffer.alloc(4800);
+  await withMockGemini(
+    (req, res) => {
+      requestedPath = req.url;
+      let raw = "";
+      req.on("data", (chunk) => { raw += chunk; });
+      req.on("end", () => {
+        sentBody = JSON.parse(raw);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          candidates: [{ content: { parts: [{ inlineData: { mimeType: "audio/L16;codec=pcm;rate=24000", data: pcm.toString("base64") } }] } }]
+        }));
+      });
+    },
+    async () => {
+      const originalProvider = config.ttsProvider;
+      config.ttsProvider = "gemini";
+      t.after(() => { config.ttsProvider = originalProvider; });
+
+      const res = await fetch(`${base}/api/v1/speak`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: "Привет" })
+      });
+
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get("content-type"), "audio/wav");
+      const audio = Buffer.from(await res.arrayBuffer());
+      assert.equal(audio.subarray(0, 4).toString(), "RIFF", "без заголовка WAV часы не проиграют звук");
+      assert.equal(audio.subarray(8, 12).toString(), "WAVE");
+      assert.equal(audio.length, 44 + pcm.length);
+      assert.equal(audio.readUInt32LE(24), 24000, "частота берётся из ответа провайдера");
+      assert.ok(requestedPath.includes(":generateContent"), requestedPath);
+      assert.deepEqual(sentBody.generationConfig.responseModalities, ["AUDIO"]);
+      assert.ok(sentBody.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName);
+    }
+  );
+});
+
+test("частота берётся из ответа, а не зашита: иначе звук пойдёт не на той скорости", async (t) => {
+  await withMockGemini(
+    (req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        candidates: [{ content: { parts: [{ inlineData: { mimeType: "audio/L16;codec=pcm;rate=16000", data: Buffer.alloc(320).toString("base64") } }] } }]
+      }));
+    },
+    async () => {
+      const originalProvider = config.ttsProvider;
+      config.ttsProvider = "gemini";
+      t.after(() => { config.ttsProvider = originalProvider; });
+
+      const res = await fetch(`${base}/api/v1/speak`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: "тест" })
+      });
+      const audio = Buffer.from(await res.arrayBuffer());
+      assert.equal(audio.readUInt32LE(24), 16000);
+      assert.equal(audio.readUInt32LE(28), 16000 * 2, "byteRate должен пересчитаться вместе с частотой");
+    }
+  );
+});
+
+test("ответ Gemini без аудио даёт 502, а не пустой файл", async (t) => {
+  await withMockGemini(
+    (req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: "я не умею" }] } }] }));
+    },
+    async () => {
+      const originalProvider = config.ttsProvider;
+      config.ttsProvider = "gemini";
+      t.after(() => { config.ttsProvider = originalProvider; });
+
+      const res = await fetch(`${base}/api/v1/speak`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: "тест" })
+      });
+      assert.equal(res.status, 502);
+      const body = await res.json();
+      assert.equal(body.ok, false);
+    }
+  );
+});
+
+test("статус сообщает, что озвучка доступна, когда включён Gemini", async (t) => {
+  const original = { provider: config.ttsProvider, key: config.apiKey };
+  config.ttsProvider = "gemini";
+  config.apiKey = "test-key";
+  t.after(() => { config.ttsProvider = original.provider; config.apiKey = original.key; });
+
+  const body = await (await fetch(`${base}/api/v1/status`)).json();
+  assert.equal(body.capabilities.speech, true, "иначе часы напишут, что озвучка не настроена");
+});

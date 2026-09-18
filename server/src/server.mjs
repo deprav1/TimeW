@@ -46,7 +46,13 @@ const config = {
   // Озвучка ответа (TTS) через OpenAI-совместимый /audio/speech.
   // Gemini's AI_API_KEY is never used for this endpoint. For backwards
   // compatibility an OpenAI AI_API_KEY may be reused when TTS_* is omitted.
-  ttsProvider: env.TTS_PROVIDER || (env.AI_PROVIDER === "openai" ? "openai-compatible" : "none"),
+  // Если ответы берутся у Gemini, озвучка достаётся тем же ключом — Gemini
+  // синтезирует речь сам. Отдельный сервис нужен только другим провайдерам.
+  ttsProvider: env.TTS_PROVIDER || (env.AI_PROVIDER === "gemini" ? "gemini" : env.AI_PROVIDER === "openai" ? "openai-compatible" : "none"),
+  // Модель и голос Gemini для синтеза. Голоса перечислены в документации
+  // Gemini TTS; Kore — нейтральный женский, хорошо читает по-русски.
+  geminiTtsModel: env.GEMINI_TTS_MODEL || "gemini-3.1-flash-tts-preview",
+  geminiTtsVoice: env.GEMINI_TTS_VOICE || "Kore",
   ttsApiKey: env.TTS_API_KEY || (env.AI_PROVIDER === "openai" ? env.AI_API_KEY || "" : ""),
   ttsBaseUrl: (env.TTS_BASE_URL || (env.AI_PROVIDER === "openai" ? env.AI_BASE_URL || "https://api.openai.com/v1" : "https://api.openai.com/v1")).replace(/\/$/, ""),
   ttsModel: env.TTS_MODEL || "gpt-4o-mini-tts",
@@ -125,6 +131,14 @@ async function putIdempotent(key, fingerprint, response) {
 }
 
 async function resetIdempotency() { await store.kvClear(IDEMPOTENCY_PREFIX); }
+
+// Можно ли озвучивать ответы. Часы спрашивают это через /api/v1/status и
+// пишут на экране, если озвучка недоступна: иначе включённая настройка
+// просто молчала бы без объяснений.
+function ttsAvailable() {
+  if (config.ttsProvider === "gemini") return Boolean(config.apiKey);
+  return Boolean(config.ttsApiKey && config.ttsProvider === "openai-compatible");
+}
 
 function publicMode() {
   return config.provider === "mock" || !config.apiKey ? "demo" : "live";
@@ -1125,6 +1139,65 @@ async function handleVoice(req, res, reqUrl) {
 // success: no key (or provider=mock) is a clear, typed 503, not silent
 // audio; upstream HTTP failures become the usual 502/503/504 via
 // providerError()/fetchProvider(), never a bare 500.
+// Gemini отдаёт озвучку сырыми сэмплами (audio/L16, 16 бит, моно), без
+// контейнера — проиграть такое нельзя ни в браузере, ни на часах. Дописываем
+// 44-байтовый заголовок WAV, и получается обычный файл.
+//
+// Частоту берём из mimeType ответа, а не зашиваем: она указана там явно
+// (`rate=24000`), и если Google её поменяет, зашитое число дало бы звук,
+// воспроизводимый на неверной скорости — ошибка, которую слышно, но по коду
+// не видно.
+function pcmToWav(pcm, sampleRate) {
+  const header = Buffer.alloc(44);
+  const channels = 1;
+  const bitsPerSample = 16;
+  const byteRate = sampleRate * channels * (bitsPerSample / 8);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20); // PCM без сжатия
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(channels * (bitsPerSample / 8), 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
+}
+
+// Озвучка через Gemini — тем же ключом, что и ответы. Отдельный ключ нужен
+// только если AI берётся у другого провайдера.
+async function synthesizeSpeechGemini(text) {
+  const url = `${config.geminiBaseUrl}/v1beta/models/${config.geminiTtsModel}:generateContent`;
+  const response = await fetchProvider(url, {
+    method: "POST",
+    headers: { "x-goog-api-key": config.apiKey, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text }] }],
+      generationConfig: {
+        responseModalities: ["AUDIO"],
+        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: config.geminiTtsVoice } } }
+      }
+    })
+  });
+  if (!response.ok) await providerError(response, "Gemini TTS");
+  const body = await response.json();
+  const part = body?.candidates?.[0]?.content?.parts?.find((p) => p.inlineData || p.inline_data);
+  const inline = part && (part.inlineData || part.inline_data);
+  if (!inline?.data) {
+    const err = new Error("Gemini TTS вернул ответ без аудио");
+    err.statusCode = 502;
+    err.publicMessage = "Озвучка не пришла от провайдера";
+    err.code = "provider_error";
+    throw err;
+  }
+  const rate = Number((String(inline.mimeType || inline.mime_type || "").match(/rate=(\d+)/) || [])[1]) || 24000;
+  return { audio: pcmToWav(Buffer.from(inline.data, "base64"), rate), contentType: "audio/wav" };
+}
+
 async function synthesizeSpeech(text) {
   // Runtime compatibility for tests/older local setups that switch the AI
   // provider object directly. Never inherit credentials from Gemini.
@@ -1135,6 +1208,18 @@ async function synthesizeSpeech(text) {
     : (ttsProvider === "openai-compatible" && config.provider === "openai-compatible" ? config.apiKey : "");
   const ttsBaseUrl = ttsProvider === "openai-compatible" && config.ttsApiKey
     ? config.ttsBaseUrl : config.baseUrl;
+  // Gemini умеет синтез сам, тем же ключом: отдельный сервис нужен только
+  // если ответы берутся у другого провайдера.
+  if (ttsProvider === "gemini") {
+    if (!config.apiKey) {
+      const err = new Error("Gemini TTS requires AI_API_KEY");
+      err.statusCode = 503;
+      err.publicMessage = "Озвучка недоступна: не задан AI_API_KEY";
+      err.code = "tts_unavailable";
+      throw err;
+    }
+    return synthesizeSpeechGemini(text);
+  }
   if (ttsProvider === "mock") {
     const err = new Error("TTS mock provider is not available");
     err.statusCode = 503;
@@ -1143,9 +1228,9 @@ async function synthesizeSpeech(text) {
     throw err;
   }
   if (!ttsApiKey || ttsProvider !== "openai-compatible") {
-    const err = new Error("TTS is not configured on the gateway (set TTS_API_KEY and TTS_PROVIDER=openai-compatible)");
+    const err = new Error("TTS is not configured on the gateway");
     err.statusCode = 503;
-    err.publicMessage = "Озвучка недоступна: задайте отдельные TTS_API_KEY и TTS_PROVIDER=openai-compatible";
+    err.publicMessage = "Озвучка недоступна: задайте TTS_PROVIDER=gemini (тем же ключом) или TTS_API_KEY для отдельного сервиса";
     err.code = "tts_unavailable";
     throw err;
   }
@@ -1160,12 +1245,15 @@ async function synthesizeSpeech(text) {
     })
   });
   if (!response.ok) await providerError(response, "TTS provider");
-  return Buffer.from(await response.arrayBuffer());
+  return { audio: Buffer.from(await response.arrayBuffer()), contentType: "audio/mpeg" };
 }
 
-function sendAudio(res, audioBuffer) {
+// Тип содержимого зависит от провайдера: OpenAI-совместимый отдаёт mp3,
+// Gemini — WAV, собранный нами из сырых сэмплов. Часы скачивают файл и
+// проигрывают его, поэтому заголовок должен быть честным.
+function sendAudio(res, audioBuffer, contentType) {
   res.writeHead(200, {
-    "Content-Type": "audio/mpeg",
+    "Content-Type": contentType || "audio/mpeg",
     "Content-Length": audioBuffer.length,
     "Cache-Control": "no-store",
     "Access-Control-Allow-Origin": "*"
@@ -1182,8 +1270,8 @@ async function handleSpeak(req, res) {
   const text = typeof body.text === "string" ? body.text.trim() : "";
   if (!text) return error(res, 400, "text is required");
   if (text.length > 1000) return error(res, 400, "text must be at most 1000 characters long");
-  const audioBuffer = await synthesizeSpeech(text);
-  sendAudio(res, audioBuffer);
+  const speech = await synthesizeSpeech(text);
+  sendAudio(res, speech.audio, speech.contentType);
 }
 
 // GET /api/v1/speak/:id: synthesizes the text registered earlier under this
@@ -1195,8 +1283,8 @@ async function handleSpeakById(req, res, id) {
   if (text === null) {
     return error(res, 404, "Озвучка не найдена или устарела, запросите ответ заново", "not_found");
   }
-  const audioBuffer = await synthesizeSpeech(text);
-  sendAudio(res, audioBuffer);
+  const speech = await synthesizeSpeech(text);
+  sendAudio(res, speech.audio, speech.contentType);
 }
 
 async function route(req, res) {
@@ -1232,7 +1320,7 @@ async function route(req, res) {
       capabilities: {
         ai: publicMode() === "live",
         notes: true,
-        speech: Boolean(config.ttsApiKey && config.ttsProvider === "openai-compatible"),
+        speech: ttsAvailable(),
         home: isTuyaEnabled(),
         homeConfirmation: true
       }
