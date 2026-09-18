@@ -40,6 +40,7 @@ const {
   parseMultipart,
   parseNote,
   resetDialogHistory,
+  settleBackgroundWrites,
   resetRateLimit,
   resetSpeechRegistry,
   resetTuyaTokenCache,
@@ -1273,6 +1274,7 @@ test("dialog memory: a second query sees the first exchange in the provider's me
   const resetBody = await resetRes.json();
   assert.equal(resetBody.ok, true);
   assert.ok(resetBody.cleared >= 1);
+  await settleBackgroundWrites();
   assert.deepEqual(await getDialogHistory(), []);
 });
 
@@ -1287,6 +1289,7 @@ test("dialog memory: notes and home commands never enter the history", async () 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text: "включи свет на кухне" })
   });
+  await settleBackgroundWrites();
   assert.deepEqual(await getDialogHistory(), []);
 });
 
@@ -1299,8 +1302,10 @@ test("dialog memory: a turn older than DIALOG_TTL_MS is not mixed into the conte
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: "Первый вопрос" })
     });
+    await settleBackgroundWrites();
     assert.equal((await getDialogHistory()).length, 1);
     await new Promise((resolve) => setTimeout(resolve, 40));
+    await settleBackgroundWrites();
     assert.deepEqual(await getDialogHistory(), [], "the stale turn must be filtered out by TTL");
   } finally {
     config.dialogTtlMs = originalTtl;

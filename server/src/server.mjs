@@ -717,14 +717,39 @@ async function resetDialogHistory() {
 const SPEECH_REGISTRY_MAX = 50;
 const SPEECH_PREFIX = "speech:";
 
-async function registerSpeech(text) {
+// Идентификатор выдаётся сразу, а запись в хранилище идёт следом, не
+// задерживая ответ. Хранилище живёт в другом регионе, и каждое обращение
+// стоит около 150 мс — на часах это заметно, а ответу эта запись не нужна:
+// озвучку человек запрашивает отдельным запросом секундой позже.
+function registerSpeech(text) {
   const id = randomUUID();
-  await store.kvSet(SPEECH_PREFIX + id, { text }, config.speechTtlMs);
-  if ((await store.kvCount(SPEECH_PREFIX)) > SPEECH_REGISTRY_MAX) {
-    const oldest = await store.kvOldest(SPEECH_PREFIX);
-    if (oldest) await store.kvDelete(oldest);
-  }
+  const write = (async () => {
+    await store.kvSet(SPEECH_PREFIX + id, { text }, config.speechTtlMs);
+    if ((await store.kvCount(SPEECH_PREFIX)) > SPEECH_REGISTRY_MAX) {
+      const oldest = await store.kvOldest(SPEECH_PREFIX);
+      if (oldest) await store.kvDelete(oldest);
+    }
+  })();
+  trackBackgroundWrite(write, "registerSpeech");
   return id;
+}
+
+// Фоновые записи нельзя просто бросить: необработанный отказ промиса роняет
+// процесс в Deno, а на часах это выглядело бы как внезапно умерший шлюз.
+// Ошибку пишем в лог и живём дальше — потеря истории диалога не стоит отказа
+// в обслуживании.
+const backgroundWrites = new Set();
+function trackBackgroundWrite(promise, label) {
+  backgroundWrites.add(promise);
+  promise
+    .catch((cause) => console.error(`[${new Date().toISOString()}] фоновая запись ${label} не удалась: ${cause.message}`))
+    .finally(() => backgroundWrites.delete(promise));
+}
+
+// Тесты ждут, пока фоновые записи улягутся: иначе проверка истории диалога
+// гоняется с ещё не завершённой записью и падает через раз.
+async function settleBackgroundWrites() {
+  while (backgroundWrites.size) await Promise.allSettled(Array.from(backgroundWrites));
 }
 
 // Returns the registered text for a still-fresh id, or null if the id is
@@ -1036,8 +1061,8 @@ async function handleQuery(req, res, reqUrl) {
   }
   const history = await getDialogHistory();
   const result = await providerChat(text, { provider, history });
-  await recordDialogTurn(text, result.text);
-  const speechId = result.text ? await registerSpeech(result.text) : undefined;
+  trackBackgroundWrite(recordDialogTurn(text, result.text), "recordDialogTurn");
+  const speechId = result.text ? registerSpeech(result.text) : undefined;
   const response = { ok: true, kind: "ai", ...result, ...(speechId ? { speechId } : {}) };
   await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
   return json(res, 200, response);
@@ -1097,8 +1122,8 @@ async function handleVoice(req, res, reqUrl) {
       await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
       return json(res, 200, response);
     }
-    await recordDialogTurn(transcript, answer);
-    const speechId = answer ? await registerSpeech(answer) : undefined;
+    trackBackgroundWrite(recordDialogTurn(transcript, answer), "recordDialogTurn");
+    const speechId = answer ? registerSpeech(answer) : undefined;
     const response = { ok: true, transcript, kind: "ai", text: answer, source: "gemini", ...(speechId ? { speechId } : {}) };
     await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
     return json(res, 200, response);
@@ -1130,8 +1155,8 @@ async function handleVoice(req, res, reqUrl) {
   }
   const history = await getDialogHistory();
   const result = await providerChat(transcript, { provider, history });
-  await recordDialogTurn(transcript, result.text);
-  const speechId = result.text ? await registerSpeech(result.text) : undefined;
+  trackBackgroundWrite(recordDialogTurn(transcript, result.text), "recordDialogTurn");
+  const speechId = result.text ? registerSpeech(result.text) : undefined;
   const response = { ok: true, transcript, kind: "ai", ...result, ...(speechId ? { speechId } : {}) };
   await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
   return json(res, 200, response);
@@ -1492,6 +1517,7 @@ export {
   resetTuyaTokenCache,
   route,
   server,
+  settleBackgroundWrites,
   setStore,
   SAFE_INSTANT_DEVICES
 };

@@ -8,7 +8,10 @@
   <div class="page">
     <text class="status" onclick="unstick">{{status}}</text>
 
-    <div class="answer-area" onclick="openAnswer">
+    <!-- Область ответа — тоже цель для пальца: когда ответа ещё нет, тап по
+         ней начинает разговор. На часах промахнуться мимо кнопки легко, а
+         промахнуться мимо половины экрана — нет. -->
+    <div class="answer-area" onclick="tapAnswer">
       <text class="heard" if="{{transcript}}">{{transcript}}</text>
       <text class="answer">{{result}}</text>
     </div>
@@ -35,6 +38,7 @@ import vibrator from "@system.vibrator"
 import router from "@system.router"
 import { query, voiceUri, resetDialog, confirmHome } from "../../common/api"
 import { recordAudio, stopRecording } from "../../common/audio"
+import { MAX_RECORDING_MS } from "../../common/config"
 import { loadSettings, getCached } from "../../common/settings"
 import { speak } from "../../common/speech"
 import { isOnline } from "../../common/net"
@@ -59,6 +63,7 @@ export default {
     speechId: "",
     voiceEpoch: 0,
     recording: false,
+    tickerId: 0,
     settingsReady: false,
     lastSyncAt: 0
   },
@@ -110,6 +115,7 @@ export default {
   unstick() {
     if (!this.busy) return
     this.voiceEpoch += 1
+    this.stopTicker()
     if (this.recording) stopRecording()
     this.recording = false
     this.setBusy(false)
@@ -128,6 +134,21 @@ export default {
 
   openNotes() {
     router.push({ uri: "/pages/notes" })
+  },
+
+  // Пока ответа нет, тап по центру экрана означает «хочу спросить».
+  // Когда ответ есть — открывает его целиком: короткий текст на круглом
+  // экране обрезается, и прочитать остальное иначе негде.
+  tapAnswer() {
+    if (this.busy || this.recording) {
+      this.talk()
+      return
+    }
+    if (!this.hasAnswer) {
+      this.startVoice("")
+      return
+    }
+    this.openAnswer()
   },
 
   openAnswer() {
@@ -161,11 +182,41 @@ export default {
 
   finishRecording() {
     this.recording = false
-    this.status = "думаю…"
-    this.talkLabel = "Думаю"
+    this.beginThinking()
     // record.stop() завершает запись, и рантайм отдаёт файл в тот же
     // success-колбэк, что и по истечении времени.
     stopRecording()
+  },
+
+  // Видимое ожидание переносится легче молчаливого. Через телефон ответ идёт
+  // секунды, и без бегущего счётчика экран выглядит зависшим — человек жмёт
+  // ещё раз и всё отменяет.
+  startTicker(mode) {
+    var self = this
+    self.stopTicker()
+    var started = Date.now()
+    self.tickerId = setInterval(function() {
+      var passed = Math.round((Date.now() - started) / 1000)
+      if (mode === "record") {
+        var left = Math.max(0, Math.round(MAX_RECORDING_MS / 1000) - passed)
+        self.status = left > 0 ? "говорите · " + left : "заканчиваю…"
+      } else {
+        self.status = "думаю · " + passed
+      }
+    }, 1000)
+  },
+
+  stopTicker() {
+    if (this.tickerId) {
+      clearInterval(this.tickerId)
+      this.tickerId = 0
+    }
+  },
+
+  beginThinking() {
+    this.talkLabel = "Думаю"
+    this.status = "думаю · 0"
+    this.startTicker("think")
   },
 
   startVoice(intent) {
@@ -177,18 +228,19 @@ export default {
     self.setBusy(true)
     self.errorText = ""
     self.transcript = ""
-    self.status = "говорите"
     self.talkLabel = "Готово"
     self.result = "Нажмите, когда договорите"
+    self.status = "говорите · " + Math.round(MAX_RECORDING_MS / 1000)
+    self.startTicker("record")
 
     recordAudio(function(audio) {
       if (epoch !== self.voiceEpoch) return
       self.recording = false
-      self.status = "думаю…"
-      self.talkLabel = "Думаю"
+      self.beginThinking()
 
       voiceUri(audio.uri, audio.contentType, intent, function(response) {
         if (epoch !== self.voiceEpoch) return
+        self.stopTicker()
         self.setBusy(false)
         self.errorText = ""
         self.transcript = response.transcript || ""
@@ -201,6 +253,7 @@ export default {
         self.applyResponse(response)
       }, function(error) {
         if (epoch !== self.voiceEpoch) return
+        self.stopTicker()
         self.setBusy(false)
         self.status = "ошибка"
         self.errorText = messageFrom(error)
@@ -209,6 +262,7 @@ export default {
     }, function(error) {
       if (epoch !== self.voiceEpoch) return
       self.recording = false
+      self.stopTicker()
       self.setBusy(false)
       self.status = "готов"
       self.errorText = messageFrom(error)
@@ -267,6 +321,7 @@ export default {
         if (!data || data.index !== 0) return
         self.setBusy(true)
         resetDialog(function() {
+          self.stopTicker()
           self.setBusy(false)
           self.status = "готов"
           self.transcript = ""
@@ -275,6 +330,7 @@ export default {
           self.errorText = ""
           self.updateTalkLabel()
         }, function(error) {
+          self.stopTicker()
           self.setBusy(false)
           self.status = "ошибка"
           self.errorText = messageFrom(error)
