@@ -13,3 +13,4 @@ server/node_modules/
 deno.lock
 # Токен доступа Deno Deploy: только локально, никогда в репозиторий
 .deno-token
+deno.txt
