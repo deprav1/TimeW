@@ -24,7 +24,30 @@ const { route, config, setStore } = await import("./server.mjs");
 const { createFetchHandler } = await import("./fetch-adapter.mjs");
 const { createKvStore } = await import("./store.mjs");
 
-const kv = await globalThis.Deno.openKv();
+// Хранилище открывается при первом обращении, а не при загрузке модуля.
+//
+// Причина практическая: если открыть его сразу и базы ещё нет, приложение
+// не поднимается вовсе — снаружи видно только «revision failed», и понять
+// что-либо можно лишь по логам сборки. А базу к новому приложению нельзя
+// привязать до того, как оно создано: получается курица и яйцо.
+// С отложенным открытием приложение поднимается всегда, а без базы честно
+// отвечает ошибкой на запросы.
+let kvPromise = null;
+function openKv() {
+  if (!kvPromise) kvPromise = globalThis.Deno.openKv();
+  return kvPromise;
+}
+
+const kv = {
+  async get(key) { return (await openKv()).get(key); },
+  async set(key, value, options) { return (await openKv()).set(key, value, options); },
+  async delete(key) { return (await openKv()).delete(key); },
+  async *list(selector) {
+    const db = await openKv();
+    for await (const entry of db.list(selector)) yield entry;
+  }
+};
+
 setStore(createKvStore(kv));
 
 if (config.provider !== "mock" && !config.apiKey) {
