@@ -41,4 +41,12 @@ const handler = createFetchHandler(route, {
   log: config.logRequests ? (line) => console.log(`${new Date().toISOString()} ${line}`) : undefined
 });
 
-globalThis.Deno.serve(handler);
+// На Deno Deploy порт назначает платформа, и указывать его нельзя.
+// Локально — берём тот же PORT, что и обычный запуск, иначе Deno molча
+// слушал бы свой порт по умолчанию, а проверка стучалась бы не туда.
+const onDeploy = Boolean(globalThis.Deno.env.get("DENO_DEPLOYMENT_ID"));
+if (onDeploy) {
+  globalThis.Deno.serve(handler);
+} else {
+  globalThis.Deno.serve({ port: config.port, hostname: config.host }, handler);
+}

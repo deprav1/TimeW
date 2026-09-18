@@ -12,6 +12,9 @@
     "test:server": "npm --prefix server test",
     "test:watch": "npm --prefix watch test",
     "smoke": "node server/scripts/smoke.mjs",
-    "build": "npm --prefix watch run build"
+    "build": "npm --prefix watch run build",
+    "deno": "npx --yes deno@latest run -A --unstable-kv server/src/deno-entry.mjs",
+    "login": "npx --yes deno@latest run -A jsr:@deno/deployctl login",
+    "deploy": "npx --yes deno@latest run -A jsr:@deno/deployctl deploy --project=timew-gateway --entrypoint=server/src/deno-entry.mjs --env-file=server/.env --prod"
   }
 }
