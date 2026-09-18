@@ -62,7 +62,8 @@ export default {
     busy: false,
     hasReport: false,
     sentText: "",
-    report: null
+    report: null,
+    tlsResults: []
   },
 
   goBack() {
@@ -142,8 +143,39 @@ export default {
           self.add("озвучка", status.body.capabilities && status.body.capabilities.speech ? "есть" : "нет")
           self.add("сборка шлюза", String(status.body.buildId || "").slice(0, 12))
         }
-        self.finish(report)
+        self.probeTls(report, 0)
       })
+    })
+  },
+
+  // Проба доверия к сертификатам.
+  //
+  // Часы вернули код 35 — это отказ TLS-соединения, а не ответ сервера.
+  // Наш адрес на deno.net отдаёт четырёхуровневую цепочку с двумя
+  // перекрёстно подписанными корнями (Root YE ← X2 ← X1), и встроенные
+  // TLS-стеки на таких часто спотыкаются. Проверяем несколько адресов с
+  // разными удостоверяющими центрами: те, что пройдут, покажут, за каким
+  // именно сертификатом можно спрятать шлюз.
+  probeTls(report, index) {
+    var self = this
+    var targets = [
+      { name: "Google", url: "https://www.google.com/generate_204" },
+      { name: "Cloudflare", url: "https://cloudflare.com/cdn-cgi/trace" },
+      { name: "Telegram", url: "https://api.telegram.org" },
+      { name: "LetsEncrypt", url: "https://letsencrypt.org/robots.txt" },
+      { name: "без шифрования", url: "http://neverssl.com" }
+    ]
+    if (index >= targets.length) {
+      report.tls = self.tlsResults
+      self.finish(report)
+      return
+    }
+    if (index === 0) self.tlsResults = []
+    var target = targets[index]
+    self.timedRequest(target.url, null, function(result) {
+      self.tlsResults.push({ name: target.name, status: result.status, ms: result.ms, error: result.error })
+      self.add(target.name, (result.status ? "код " + result.status : "не дошёл") + (result.error ? " — " + result.error : ""))
+      self.probeTls(report, index + 1)
     })
   },
 
