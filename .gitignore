@@ -11,3 +11,5 @@ server/node_modules/
 .research-open-vela-docs/
 .claude/settings.local.json
 deno.lock
+# Токен доступа Deno Deploy: только локально, никогда в репозиторий
+.deno-token
