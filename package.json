@@ -1,0 +1,15 @@
+{
+  "name": "timew",
+  "version": "0.2.0",
+  "private": true,
+  "engines": { "node": ">=20" },
+  "comment": "Все команды проекта живут здесь, чтобы не надо было помнить, что запускается из server/, а что из watch/. Внутренние подпроекты по-прежнему самостоятельны.",
+  "scripts": {
+    "setup": "node server/scripts/setup.mjs",
+    "start": "node server/src/server.mjs",
+    "autostart": "node server/scripts/autostart.mjs",
+    "test": "npm --prefix server test",
+    "smoke": "node server/scripts/smoke.mjs",
+    "build": "npm --prefix watch run build"
+  }
+}

@@ -141,10 +141,26 @@ export default {
     }
     self.errorText = ""
     self.checkResult = "проверяю…"
-    fetch.fetch({
-      url: normalizeUrl(self.gatewayUrl) + "/health",
+    var finished = false
+    var timer = setTimeout(function() {
+      if (finished) return
+      finished = true
+      self.checkResult = ""
+      self.errorText = "Шлюз не ответил вовремя"
+    }, 8000)
+    var settle = function(handler) {
+      return function() {
+        if (finished) return
+        finished = true
+        clearTimeout(timer)
+        handler.apply(null, arguments)
+      }
+    }
+    try { fetch.fetch({
+      url: normalizeUrl(self.gatewayUrl) + "/api/v1/status",
       method: "GET",
-      success: function(response) {
+      header: self.deviceToken ? { "X-TimeW-Device-Token": self.deviceToken } : {},
+      success: settle(function(response) {
         var raw = response && (response.data || response.body || response)
         var parsed = raw
         try {
@@ -160,12 +176,15 @@ export default {
         }
         var mode = parsed && parsed.mode ? parsed.mode : "unknown"
         self.checkResult = "шлюз на связи, режим " + mode
-      },
-      fail: function(error) {
+      }),
+      fail: settle(function(error) {
         self.checkResult = ""
-        self.errorText = messageFrom(error)
-      }
-    })
+        var status = statusFrom(error)
+        self.errorText = status === 401 ? "Неверный токен устройства" : messageFrom(error)
+      })
+    }) } catch (error) {
+      settle(function() { self.checkResult = ""; self.errorText = messageFrom(error) })()
+    }
   },
 
   save() {

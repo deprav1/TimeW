@@ -18,6 +18,12 @@ function deviceToken() {
   return getCached().deviceToken
 }
 
+var requestCounter = 0
+function makeRequestKey(kind) {
+  requestCounter += 1
+  return "timew-" + kind + "-" + Date.now() + "-" + requestCounter
+}
+
 function parse(response) {
   var raw = response && (response.data || response.body || response)
   return typeof raw === "string" ? JSON.parse(raw) : raw
@@ -95,7 +101,11 @@ function callFetch(options, timeoutMs, done, fail) {
   })
   options.success = settle(function(response) { handleResponse(response, done, fail) })
   options.fail = settle(function(error) { handleFail(error, fail) })
-  fetch.fetch(options)
+  try {
+    fetch.fetch(options)
+  } catch (error) {
+    settle(function() { fail({ message: "Не удалось начать запрос к шлюзу" }) })()
+  }
 }
 
 function handleFail(error, fail) {
@@ -108,14 +118,16 @@ function handleFail(error, fail) {
   fail(error)
 }
 
-export function query(text, done, fail) {
+export function query(text, done, fail, requestKey) {
   var payload = { text: text }
+  var stableKey = requestKey || makeRequestKey("query")
+  payload.requestId = stableKey
   var provider = getCached().aiProvider
   if (provider && provider !== "auto") payload.provider = provider
   callFetch({
     url: baseUrl() + "/api/v1/query",
     method: "POST",
-    header: headers(),
+    header: headers({ "Idempotency-Key": stableKey }),
     data: JSON.stringify(payload)
   }, REQUEST_TIMEOUT_MS, done, fail)
 }
@@ -154,12 +166,13 @@ function withProvider(path, intent) {
   var provider = getCached().aiProvider
   if (provider && provider !== "auto") params.push("provider=" + provider)
   if (intent) params.push("intent=" + intent)
+  if (intent === "note") params.push("preview=1")
   return params.length ? path + "?" + params.join("&") : path
 }
 
 // Путь A: request.upload отправляет файл по uri как multipart/form-data.
 // Шлюз принимает multipart наравне с сырым телом.
-function uploadByUri(path, uri, contentType, intent, done, fail) {
+function uploadByUri(path, uri, contentType, intent, requestKey, done, fail) {
   // Проверено опросом рантайма: метода request.upload не существует.
   // Вызов несуществующей функции бросает исключение, поэтому проверяем явно,
   // а не полагаемся на колбэк ошибки. Путь оставлен на случай прошивки,
@@ -168,7 +181,7 @@ function uploadByUri(path, uri, contentType, intent, done, fail) {
     fail({ message: "Отправка файлом не поддерживается" })
     return
   }
-  var uploadHeaders = {}
+  var uploadHeaders = { "Idempotency-Key": requestKey }
   var token = deviceToken()
   if (token) uploadHeaders["X-TimeW-Device-Token"] = token
   var settle = guard(UPLOAD_TIMEOUT_MS, function() {
@@ -190,7 +203,7 @@ function uploadByUri(path, uri, contentType, intent, done, fail) {
 }
 
 // Путь B: прочитать файл в память и отправить сырые байты.
-function uploadByBytes(path, uri, contentType, intent, done, fail) {
+function uploadByBytes(path, uri, contentType, intent, requestKey, done, fail) {
   var settle = guard(REQUEST_TIMEOUT_MS, function() {
     fail({ message: "Не удалось прочитать запись с часов" })
   })
@@ -209,14 +222,14 @@ function uploadByBytes(path, uri, contentType, intent, done, fail) {
         fail({ message: "Ничего не записалось, попробуйте ещё раз", serverError: true })
         return
       }
-      sendAudioBytes(path, bytes, contentType, intent, done, fail)
+      sendAudioBytes(path, bytes, contentType, intent, requestKey, done, fail)
     }),
     fail: settle(function(error) { handleFail(error, fail) })
   })
 }
 
-function sendAudioBytes(path, audio, contentType, intent, done, fail) {
-  var requestHeaders = headers({ "Content-Type": contentType || "application/octet-stream" })
+function sendAudioBytes(path, audio, contentType, intent, requestKey, done, fail) {
+  var requestHeaders = headers({ "Content-Type": contentType || "application/octet-stream", "Idempotency-Key": requestKey })
   callFetch({
     url: baseUrl() + withProvider(path, intent),
     method: "POST",
@@ -236,9 +249,10 @@ export function voiceUri(uri, contentType, intent, done, fail) {
   }
   var preferred = getCached().transferMode === "upload" ? "upload" : "bytes"
   var other = preferred === "upload" ? "bytes" : "upload"
+  var requestKey = makeRequestKey("voice")
 
   function attempt(mode, onFail) {
-    senders[mode]("/api/v1/voice", uri, contentType, intent, function(response) {
+    senders[mode]("/api/v1/voice", uri, contentType, intent, requestKey, function(response) {
       rememberTransferMode(mode)
       done(response, mode)
     }, onFail)
@@ -261,5 +275,14 @@ export function resetDialog(done, fail) {
     method: "POST",
     header: headers(),
     data: "{}"
+  }, REQUEST_TIMEOUT_MS, done, fail)
+}
+
+export function confirmHome(confirmationToken, done, fail) {
+  callFetch({
+    url: baseUrl() + "/api/v1/home/confirm",
+    method: "POST",
+    header: headers({ "Idempotency-Key": makeRequestKey("home-confirm") }),
+    data: JSON.stringify({ confirmationToken: confirmationToken })
   }, REQUEST_TIMEOUT_MS, done, fail)
 }

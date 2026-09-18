@@ -43,6 +43,11 @@ const config = {
   dialogTurns: Number(env.DIALOG_TURNS || 6),
   dialogTtlMs: Number(env.DIALOG_TTL_MS || 900000),
   // Озвучка ответа (TTS) через OpenAI-совместимый /audio/speech.
+  // Gemini's AI_API_KEY is never used for this endpoint. For backwards
+  // compatibility an OpenAI AI_API_KEY may be reused when TTS_* is omitted.
+  ttsProvider: env.TTS_PROVIDER || (env.AI_PROVIDER === "openai" ? "openai-compatible" : "none"),
+  ttsApiKey: env.TTS_API_KEY || (env.AI_PROVIDER === "openai" ? env.AI_API_KEY || "" : ""),
+  ttsBaseUrl: (env.TTS_BASE_URL || (env.AI_PROVIDER === "openai" ? env.AI_BASE_URL || "https://api.openai.com/v1" : "https://api.openai.com/v1")).replace(/\/$/, ""),
   ttsModel: env.TTS_MODEL || "gpt-4o-mini-tts",
   ttsVoice: env.TTS_VOICE || "alloy",
   // Сколько мс живёт короткоживущий идентификатор озвучки (speechId),
@@ -59,6 +64,59 @@ const config = {
   tuyaTimeoutMs: Number(env.TUYA_TIMEOUT_MS || 10000)
 };
 const notesPath = join(config.dataDir, "notes.json");
+
+// Short-lived, bounded request-result cache. This protects the personal
+// gateway from duplicate notes/actions when a watch loses the HTTP response.
+const idempotencyStore = new Map();
+const IDEMPOTENCY_TTL_MS = 10 * 60 * 1000;
+const IDEMPOTENCY_MAX = 200;
+const confirmationStore = new Map();
+const CONFIRMATION_TTL_MS = 2 * 60 * 1000;
+
+function requestId(req, body) {
+  const value = req.headers["idempotency-key"] || req.headers["x-timew-request-id"] || body?.requestId;
+  if (value === undefined) return null;
+  const key = String(value).trim();
+  if (!key || key.length > 128) {
+    const err = new Error("requestId must be between 1 and 128 characters");
+    err.statusCode = 400;
+    throw err;
+  }
+  return key;
+}
+
+function idempotencyFingerprint(scope, body) {
+  return createHash("sha256").update(`${scope}:${JSON.stringify(body)}`).digest("hex");
+}
+
+function getIdempotent(key, fingerprint) {
+  if (!key) return null;
+  const hit = idempotencyStore.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.createdAt > IDEMPOTENCY_TTL_MS) {
+    idempotencyStore.delete(key);
+    return null;
+  }
+  if (hit.fingerprint !== fingerprint) {
+    const err = new Error("requestId was already used for a different request");
+    err.statusCode = 409;
+    err.code = "idempotency_conflict";
+    throw err;
+  }
+  return hit.response;
+}
+
+function putIdempotent(key, fingerprint, response) {
+  if (!key) return;
+  idempotencyStore.set(key, { fingerprint, response, createdAt: Date.now() });
+  while (idempotencyStore.size > IDEMPOTENCY_MAX) idempotencyStore.delete(idempotencyStore.keys().next().value);
+}
+
+function resetIdempotency() { idempotencyStore.clear(); }
+
+function publicMode() {
+  return config.provider === "mock" || !config.apiKey ? "demo" : "live";
+}
 
 function isTuyaEnabled() {
   return Boolean(config.tuyaAccessId && config.tuyaAccessSecret);
@@ -866,9 +924,25 @@ async function providerVoiceGemini(audioBytes, contentType, history) {
 // the response body — never writes to `res` itself, so both
 // /api/v1/query and /api/v1/voice can add their own extra fields (e.g. a
 // transcript) before sending it.
+async function executeHomeCommand(command, deviceIds) {
+  const value = command.action === "on";
+  await Promise.all(deviceIds.map((id) => tuyaRequest("POST", `/v1.0/iot-03/devices/${id}/commands`, {
+    commands: [{ code: "switch_led", value }]
+  })));
+  const roomText = ROOM_NAMES_RU[command.room] || command.room;
+  return {
+    ok: true, kind: "home", command, executed: true,
+    requiresConfirmation: false,
+    text: `${command.action === "off" ? "Выключил" : "Включил"} свет в ${roomText}`,
+    devices: deviceIds, source: "tuya"
+  };
+}
+
 async function buildHomeCommandResult(command) {
   const base = { ok: true, kind: "home", command, executed: false };
-
+  // Every home command is prepared first. Even harmless lights require an
+  // explicit, separate confirmation so a misheard watch command has no side
+  // effect. The token is single-use and expires quickly.
   if (!SAFE_INSTANT_DEVICES.has(command.device)) {
     return { ...base, text: "Команда распознана. Нужна проверка на телефоне.", requiresConfirmation: true, source: "parser" };
   }
@@ -892,20 +966,25 @@ async function buildHomeCommandResult(command) {
     };
   }
 
-  const value = command.action === "on";
-  await Promise.all(deviceIds.map((id) => tuyaRequest("POST", `/v1.0/iot-03/devices/${id}/commands`, {
-    commands: [{ code: "switch_led", value }]
-  })));
-
-  const roomText = ROOM_NAMES_RU[command.room] || command.room;
+  const token = randomUUID();
+  const expiresAt = Date.now() + CONFIRMATION_TTL_MS;
+  confirmationStore.set(token, { command, deviceIds, expiresAt });
   return {
     ...base,
-    executed: true,
-    requiresConfirmation: false,
-    text: `${command.action === "off" ? "Выключил" : "Включил"} свет в ${roomText}`,
-    devices: deviceIds,
-    source: "tuya"
+    text: "Команда подготовлена. Подтвердите выполнение.",
+    requiresConfirmation: true,
+    confirmationToken: token,
+    confirmationExpiresAt: new Date(expiresAt).toISOString(),
+    source: "parser"
   };
+}
+
+async function confirmHomeCommand(token) {
+  const entry = confirmationStore.get(token);
+  if (!entry) return null;
+  confirmationStore.delete(token);
+  if (Date.now() > entry.expiresAt) return null;
+  return executeHomeCommand(entry.command, entry.deviceIds);
 }
 
 // Saves a note and returns the response body — same non-writing contract as
@@ -921,6 +1000,10 @@ async function buildNoteResult(note) {
 
 async function handleQuery(req, res, reqUrl) {
   const body = await jsonBody(req);
+  const requestKey = requestId(req, body);
+  const fingerprint = idempotencyFingerprint("query", body);
+  const cached = getIdempotent(requestKey, fingerprint);
+  if (cached) return json(res, cached.status, cached.body);
   const text = normalizeText(body.text);
   if (!text) return error(res, 400, "text is required");
   const providerParam = body.provider !== undefined ? body.provider : reqUrl.searchParams.get("provider");
@@ -929,18 +1012,22 @@ async function handleQuery(req, res, reqUrl) {
   const note = parseNote(text);
   if (note) {
     const result = await buildNoteResult(note);
+    putIdempotent(requestKey, fingerprint, { status: 200, body: result });
     return json(res, 200, result);
   }
   const command = parseHomeCommand(text);
   if (command) {
     const result = await buildHomeCommandResult(command);
+    putIdempotent(requestKey, fingerprint, { status: 200, body: result });
     return json(res, 200, result);
   }
   const history = getDialogHistory();
   const result = await providerChat(text, { provider, history });
   recordDialogTurn(text, result.text);
   const speechId = result.text ? registerSpeech(result.text) : undefined;
-  return json(res, 200, { ok: true, kind: "ai", ...result, ...(speechId ? { speechId } : {}) });
+  const response = { ok: true, kind: "ai", ...result, ...(speechId ? { speechId } : {}) };
+  putIdempotent(requestKey, fingerprint, { status: 200, body: response });
+  return json(res, 200, response);
 }
 
 // POST /api/v1/voice: audio in, a ready-to-speak answer out — replaces the
@@ -962,6 +1049,12 @@ async function handleVoice(req, res, reqUrl) {
   const intentField = audio.isMultipart ? extractMultipartField(audio.raw, audio.requestType, "intent") : undefined;
   const intentParam = intentField !== undefined ? intentField : reqUrl.searchParams.get("intent");
   const forceNote = intentParam === "note";
+  const previewNote = forceNote && reqUrl.searchParams.get("preview") === "1";
+  const requestField = audio.isMultipart ? extractMultipartField(audio.raw, audio.requestType, "requestId") : undefined;
+  const requestKey = requestId(req, { requestId: requestField, provider: providerParam || "auto", intent: intentParam || "", audio: audio.bytes.toString("base64") });
+  const fingerprint = idempotencyFingerprint("voice", { provider: providerParam || "auto", intent: intentParam || "", audio: audio.bytes.toString("base64") });
+  const cached = getIdempotent(requestKey, fingerprint);
+  if (cached) return json(res, cached.status, cached.body);
 
   // Gemini optimization: one call transcribes AND answers. Only safe to use
   // the model's `answer` when the transcript turns out to be a plain
@@ -972,19 +1065,30 @@ async function handleVoice(req, res, reqUrl) {
     const history = getDialogHistory();
     const { transcript, answer } = await providerVoiceGemini(audio.bytes, audio.contentType, history);
 
+    if (previewNote) {
+      const response = { ok: true, kind: "draft", transcript, text: "Проверьте распознанную заметку", source: "gemini" };
+      putIdempotent(requestKey, fingerprint, { status: 200, body: response });
+      return json(res, 200, response);
+    }
     const note = forceNote ? normalizeText(transcript) : parseNote(transcript);
     if (note) {
       const result = await buildNoteResult(note);
-      return json(res, 200, { ...result, transcript });
+      const response = { ...result, transcript };
+      putIdempotent(requestKey, fingerprint, { status: 200, body: response });
+      return json(res, 200, response);
     }
     const command = parseHomeCommand(transcript);
     if (command) {
       const result = await buildHomeCommandResult(command);
-      return json(res, 200, { ...result, transcript });
+      const response = { ...result, transcript };
+      putIdempotent(requestKey, fingerprint, { status: 200, body: response });
+      return json(res, 200, response);
     }
     recordDialogTurn(transcript, answer);
     const speechId = answer ? registerSpeech(answer) : undefined;
-    return json(res, 200, { ok: true, transcript, kind: "ai", text: answer, source: "gemini", ...(speechId ? { speechId } : {}) });
+    const response = { ok: true, transcript, kind: "ai", text: answer, source: "gemini", ...(speechId ? { speechId } : {}) };
+    putIdempotent(requestKey, fingerprint, { status: 200, body: response });
+    return json(res, 200, response);
   }
 
   // Every other provider (mock/demo, openai-compatible): sequential
@@ -992,21 +1096,32 @@ async function handleVoice(req, res, reqUrl) {
   const transcribed = await providerTranscribe(audio.bytes, audio.contentType, { provider });
   const transcript = transcribed.text;
 
+  if (previewNote) {
+    const response = { ok: true, kind: "draft", transcript, text: "Проверьте распознанную заметку", source: transcribed.source };
+    putIdempotent(requestKey, fingerprint, { status: 200, body: response });
+    return json(res, 200, response);
+  }
   const note = forceNote ? normalizeText(transcript) : parseNote(transcript);
   if (note) {
     const result = await buildNoteResult(note);
-    return json(res, 200, { ...result, transcript });
+    const response = { ...result, transcript };
+    putIdempotent(requestKey, fingerprint, { status: 200, body: response });
+    return json(res, 200, response);
   }
   const command = parseHomeCommand(transcript);
   if (command) {
     const result = await buildHomeCommandResult(command);
-    return json(res, 200, { ...result, transcript });
+    const response = { ...result, transcript };
+    putIdempotent(requestKey, fingerprint, { status: 200, body: response });
+    return json(res, 200, response);
   }
   const history = getDialogHistory();
   const result = await providerChat(transcript, { provider, history });
   recordDialogTurn(transcript, result.text);
   const speechId = result.text ? registerSpeech(result.text) : undefined;
-  return json(res, 200, { ok: true, transcript, kind: "ai", ...result, ...(speechId ? { speechId } : {}) });
+  const response = { ok: true, transcript, kind: "ai", ...result, ...(speechId ? { speechId } : {}) };
+  putIdempotent(requestKey, fingerprint, { status: 200, body: response });
+  return json(res, 200, response);
 }
 
 // Shared by POST /api/v1/speak and GET /api/v1/speak/:id: turns text into an
@@ -1015,16 +1130,32 @@ async function handleVoice(req, res, reqUrl) {
 // audio; upstream HTTP failures become the usual 502/503/504 via
 // providerError()/fetchProvider(), never a bare 500.
 async function synthesizeSpeech(text) {
-  if (config.provider === "mock" || !config.apiKey) {
-    const err = new Error("TTS is not configured on the gateway (need a real AI_PROVIDER and AI_API_KEY)");
+  // Runtime compatibility for tests/older local setups that switch the AI
+  // provider object directly. Never inherit credentials from Gemini.
+  const ttsProvider = config.ttsProvider === "none" && config.provider === "openai-compatible"
+    ? "openai-compatible" : config.ttsProvider;
+  const ttsApiKey = ttsProvider === "openai-compatible" && config.ttsApiKey
+    ? config.ttsApiKey
+    : (ttsProvider === "openai-compatible" && config.provider === "openai-compatible" ? config.apiKey : "");
+  const ttsBaseUrl = ttsProvider === "openai-compatible" && config.ttsApiKey
+    ? config.ttsBaseUrl : config.baseUrl;
+  if (ttsProvider === "mock") {
+    const err = new Error("TTS mock provider is not available");
     err.statusCode = 503;
-    err.publicMessage = "Озвучка недоступна: TTS не настроен на шлюзе (нужен реальный AI_PROVIDER и AI_API_KEY)";
+    err.publicMessage = "Озвучка недоступна: TTS mock не реализован";
     err.code = "tts_unavailable";
     throw err;
   }
-  const response = await fetchProvider(`${config.baseUrl}/audio/speech`, {
+  if (!ttsApiKey || ttsProvider !== "openai-compatible") {
+    const err = new Error("TTS is not configured on the gateway (set TTS_API_KEY and TTS_PROVIDER=openai-compatible)");
+    err.statusCode = 503;
+    err.publicMessage = "Озвучка недоступна: задайте отдельные TTS_API_KEY и TTS_PROVIDER=openai-compatible";
+    err.code = "tts_unavailable";
+    throw err;
+  }
+  const response = await fetchProvider(`${ttsBaseUrl}/audio/speech`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${ttsApiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       model: config.ttsModel,
       voice: config.ttsVoice,
@@ -1091,10 +1222,35 @@ async function route(req, res) {
   }
 
   if (req.method === "GET" && pathname === "/health") {
-    return json(res, 200, { ok: true, service: "timew-gateway", mode: config.provider === "mock" ? "demo" : "live", version: "0.2.0" });
+    return json(res, 200, { ok: true, service: "timew-gateway", mode: publicMode(), version: "0.2.0" });
   }
 
   if (!authorized(req)) return error(res, 401, "Invalid device token", "unauthorized");
+
+  if (req.method === "GET" && pathname === "/api/v1/status") {
+    return json(res, 200, {
+      ok: true,
+      service: "timew-gateway",
+      mode: publicMode(),
+      provider: config.provider,
+      capabilities: {
+        ai: publicMode() === "live",
+        notes: true,
+        speech: Boolean(config.ttsApiKey && config.ttsProvider === "openai-compatible"),
+        home: isTuyaEnabled(),
+        homeConfirmation: true
+      }
+    });
+  }
+
+  if (req.method === "POST" && pathname === "/api/v1/home/confirm") {
+    const body = await jsonBody(req);
+    const token = typeof body.confirmationToken === "string" ? body.confirmationToken.trim() : "";
+    if (!token) return error(res, 400, "confirmationToken is required");
+    const result = await confirmHomeCommand(token);
+    if (!result) return error(res, 410, "Подтверждение отсутствует или устарело", "confirmation_expired");
+    return json(res, 200, result);
+  }
 
   if (req.method === "GET" && pathname === "/api/v1/notes") {
     const parsed = parseNotesLimit(url.searchParams);

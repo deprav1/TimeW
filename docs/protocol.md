@@ -1,4 +1,4 @@
-# Протокол TimeW v0.1
+# Протокол TimeW v0.2
 
 Все запросы идут по HTTPS. Часы передают заголовок `X-TimeW-Device-Token`, если на шлюзе задан `DEVICE_TOKEN`.
 
@@ -33,7 +33,7 @@
 ```
 Access-Control-Allow-Origin: *
 Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS
-Access-Control-Allow-Headers: Content-Type, X-TimeW-Device-Token
+Access-Control-Allow-Headers: Content-Type, X-TimeW-Device-Token, Idempotency-Key, X-TimeW-Request-Id
 Access-Control-Max-Age: 86400
 ```
 
@@ -42,10 +42,17 @@ Access-Control-Max-Age: 86400
 `GET /health` — без токена.
 
 ```json
-{"ok":true,"service":"timew-gateway","mode":"demo","version":"0.1.0"}
+{"ok":true,"service":"timew-gateway","mode":"demo","version":"0.2.0"}
 ```
 
 `mode` — `demo`, когда `AI_PROVIDER=mock` или не задан ключ, иначе `live`.
+
+`GET /api/v1/status` — защищённый статус для часов (требует токен). Возвращает
+эффективный режим и флаги возможностей без ключей и других секретов:
+
+```json
+{"ok":true,"service":"timew-gateway","mode":"demo","provider":"mock","capabilities":{"ai":false,"notes":true,"speech":false,"home":false,"homeConfirmation":true}}
+```
 
 ## Текстовый запрос
 
@@ -56,6 +63,10 @@ Access-Control-Max-Age: 86400
 ```
 
 Шлюз сам определяет намерение и возвращает одно из трёх значений `kind`.
+Для защиты от повторной доставки часов можно передать `Idempotency-Key` (или
+`X-TimeW-Request-Id`, либо `requestId` в JSON). В течение 10 минут повтор того
+же запроса возвращает исходный ответ и не создаёт дубль заметки; повтор с тем
+же ключом для другого тела даёт `409 idempotency_conflict`.
 
 **`kind: "ai"`** — обычный вопрос уходит провайдеру:
 
@@ -79,11 +90,16 @@ Access-Control-Max-Age: 86400
 }
 ```
 
-**`kind: "home"`** — распознана команда светом. Шлюз только разбирает намерение и не вызывает Google Home:
+**`kind: "home"`** — распознана команда умного дома. Подготовка никогда не
+вызывает Tuya и возвращает одноразовый `confirmationToken` (действует 2 минуты):
 
 ```json
-{"ok":true,"kind":"home","command":{"action":"off","device":"light","room":"bedroom"},"requiresConfirmation":true,"source":"parser"}
+{"ok":true,"kind":"home","command":{"action":"off","device":"light","room":"bedroom"},"requiresConfirmation":true,"confirmationToken":"…","confirmationExpiresAt":"…","source":"parser"}
 ```
+
+После явного подтверждения клиента: `POST /api/v1/home/confirm` с телом
+`{"confirmationToken":"…"}`. Токен одноразовый; истёкший или уже
+использованный токен даёт `410 confirmation_expired`.
 
 Если комната не распознана, `room` будет `null`, а `text` попросит уточнить. Это сознательная граница первой беты: Google Home SDK и OAuth появятся в Android-компаньоне после проверки видимости конкретных Tuya-светильников.
 
@@ -99,7 +115,7 @@ Access-Control-Max-Age: 86400
 {"ok":true,"transcript":"Сколько лететь до Лиссабона","kind":"ai","text":"...","source":"gemini","speechId":"…"}
 ```
 
-`kind` определяется так же, как в `/api/v1/query`: заметка сохраняется, домашняя команда исполняется по той же политике безопасности, обычный вопрос уходит модели.
+kind определяется так же, как в /api/v1/query: при intent=note и preview=1 шлюз только распознаёт текст и возвращает kind=draft; заметка сохраняется только отдельным подтверждённым запросом. Домашняя команда сначала подготавливается и выполняется только через /api/v1/home/confirm, обычный вопрос уходит модели.
 
 Зачем отдельный эндпоинт: раньше часы делали два круга — сначала расшифровка, потом вопрос. На часах Wi-Fi поднимается по требованию, поэтому лишний круг стоит секунд. Для Gemini шлюз делает **один** вызов, в котором модель и расшифровывает, и отвечает.
 
@@ -133,6 +149,10 @@ Access-Control-Max-Age: 86400
 Неизвестный или протухший идентификатор — 404. Синтез не настроен — 503.
 
 Для проверки с компьютера есть `POST /api/v1/speak` с телом `{"text":"…"}` (до 1000 символов), отдающий `audio/mpeg` напрямую.
+
+TTS настраивается отдельно: `TTS_PROVIDER=openai-compatible`, `TTS_API_KEY`
+и при необходимости `TTS_BASE_URL`. При Gemini `AI_API_KEY` никогда не
+передаётся в OpenAI-совместимый TTS endpoint.
 
 ## Заметки
 
@@ -176,7 +196,7 @@ Access-Control-Max-Age: 86400
 
 ## Проверка протокола
 
-Юнит- и HTTP-тесты: `npm test` в `server/` (74 теста, сеть не используется).
+Юнит- и HTTP-тесты: `npm test` в `server/` (80 тестов, сеть не используется).
 
 Дымовой прогон против запущенного шлюза:
 

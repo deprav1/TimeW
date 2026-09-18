@@ -68,19 +68,25 @@ export function getQueued() {
   return cache
 }
 
-export function enqueue(text, done) {
+export function enqueue(text, done, fail, requestId) {
   if (!text) {
     if (done) done(cache)
     return
   }
-  var item = { id: makeId(), text: text, createdAt: new Date().toISOString() }
+  var item = { id: makeId(), text: text, requestId: requestId || makeId(), createdAt: new Date().toISOString() }
   var next = cache.concat([item])
   if (next.length > MAX_QUEUE_SIZE) {
     next = next.slice(next.length - MAX_QUEUE_SIZE)
   }
+  var previous = cache
   cache = next
-  persist(cache, function() {
-    if (done) done(cache)
+  persist(cache, function(ok) {
+    if (ok) {
+      if (done) done(cache)
+    } else if (fail) {
+      cache = previous
+      fail(new Error("Не удалось сохранить заметку на часах"))
+    }
   })
 }
 
@@ -122,9 +128,16 @@ export function flush(sendOne, done) {
     }
     var item = cache[0]
     sendOne(item, function() {
+      var previous = cache
       removeFromCache(item.id)
       sent += 1
-      persist(cache, function() {
+      persist(cache, function(ok) {
+        if (ok === false) {
+          cache = previous
+          sent -= 1
+          finish()
+          return
+        }
         step()
       })
     }, finish)

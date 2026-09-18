@@ -1,19 +1,40 @@
 // Дымовой тест запущенного шлюза: один прогон всех эндпоинтов.
 //
-//   node scripts/smoke.mjs                       # http://127.0.0.1:8787
-//   node scripts/smoke.mjs https://my-gateway    # другой адрес
-//   TOKEN=... node scripts/smoke.mjs             # если задан DEVICE_TOKEN
-//   node scripts/smoke.mjs --audio               # добавить проверку /transcribe
+//   npm run smoke                                # http://127.0.0.1:8787
+//   npm run smoke -- https://my-gateway          # другой адрес
+//   npm run smoke -- --audio                     # добавить проверку /transcribe
+//
+// Токен подставляется из server/.env сам; переопределить — TOKEN=... .
 //
 // В live-режиме прогон тратит запросы к AI-провайдеру: один вызов чата,
 // и ещё один вызов распознавания, если передан --audio.
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// Токен лежит в server/.env — тот же файл, из которого его берёт шлюз.
+// Заставлять человека копировать его в переменную окружения перед каждым
+// прогоном значит превращать проверку в отдельную процедуру с опечатками.
+function tokenFromEnvFile() {
+  try {
+    const text = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", ".env"), "utf8");
+    const match = text.match(/^\s*DEVICE_TOKEN\s*=\s*(.*?)\s*$/m);
+    return match ? match[1] : "";
+  } catch {
+    return "";
+  }
+}
 
 const base = (process.argv.find((arg) => arg.startsWith("http")) || "http://127.0.0.1:8787").replace(/\/$/, "");
-const token = process.env.TOKEN || process.env.DEVICE_TOKEN || "";
+const token = process.env.TOKEN || process.env.DEVICE_TOKEN || tokenFromEnvFile();
 const withAudio = process.argv.includes("--audio");
 
 let passed = 0;
 let failed = 0;
+let skipped = 0;
+// Заполняется первой же проверкой /health: в live-режиме часть проверок
+// с заглушечным аудио неприменима (см. skipIfLiveRejectsFakeAudio).
+let liveMode = false;
 
 function headers(extra) {
   // Connection: close avoids a rare keep-alive socket reuse glitch (an
@@ -43,6 +64,11 @@ async function check(name, run) {
     passed += 1;
     console.log(`  ok   ${name}${detail ? ` — ${detail}` : ""}`);
   } catch (cause) {
+    if (cause?.isSkip) {
+      skipped += 1;
+      console.log(`  skip ${name} — ${cause.message}`);
+      return;
+    }
     failed += 1;
     console.log(`  FAIL ${name} — ${cause.message}`);
   }
@@ -50,6 +76,18 @@ async function check(name, run) {
 
 function expect(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+// Проверки с синтетическим аудио (несколько байт-заглушек) осмысленны только
+// в demo-режиме. На живом провайдере такой «звук» закономерно отвергается, и
+// без этой ветки исправно работающий шлюз отчитывался бы четырьмя FAIL —
+// ложная тревога, из-за которой перестают смотреть на настоящие.
+function skipIfLiveRejectsFakeAudio(status) {
+  if (liveMode && status === 502) {
+    const error = new Error("живой провайдер не принимает тестовые байты — проверяйте с --audio или в demo-режиме");
+    error.isSkip = true;
+    throw error;
+  }
 }
 
 console.log(`TimeW smoke: ${base}${token ? " (с токеном)" : " (без токена)"}\n`);
@@ -67,6 +105,7 @@ await check("GET /health", async () => {
   expect(status === 200, `ожидался 200, получен ${status}`);
   expect(body?.ok === true, "ok !== true");
   expect(body.service === "timew-gateway", `service = ${body.service}`);
+  liveMode = body.mode === "live";
   return `режим ${body.mode}, версия ${body.version}`;
 });
 
@@ -207,6 +246,7 @@ await check("POST /api/v1/transcribe — multipart/form-data (uri-upload path)",
     headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
     body: Buffer.concat(parts)
   });
+  skipIfLiveRejectsFakeAudio(status);
   expect(status === 200, `ожидался 200, получен ${status}`);
   expect(body?.ok === true, "ok !== true");
   return `[${body.source}] ${String(body.text).slice(0, 60)}`;
@@ -230,6 +270,7 @@ await check("POST /api/v1/voice — сырое аудио (demo-режим → t
     headers: { "Content-Type": "audio/opus" },
     body: Buffer.from([1, 2, 3, 4, 5])
   });
+  skipIfLiveRejectsFakeAudio(status);
   expect(status === 200, `ожидался 200, получен ${status}`);
   expect(body?.ok === true, "ok !== true");
   expect(body.transcript, "в ответе нет transcript");
@@ -262,6 +303,7 @@ await check("POST /api/v1/voice — ответ содержит speechId", async
     headers: { "Content-Type": "audio/opus" },
     body: Buffer.from([1, 2, 3, 4, 5])
   });
+  skipIfLiveRejectsFakeAudio(status);
   expect(status === 200, `ожидался 200, получен ${status}`);
   expect(body?.kind === "ai", `kind = ${body?.kind}`);
   expect(body?.speechId, "в ответе нет speechId");
@@ -270,6 +312,7 @@ await check("POST /api/v1/voice — ответ содержит speechId", async
 });
 
 await check("GET /api/v1/speak/:id — адаптивная проверка (503 в demo или 200 с аудио — оба ок)", async () => {
+  if (!voiceSpeechId && liveMode) skipIfLiveRejectsFakeAudio(502);
   expect(voiceSpeechId, "нечего запрашивать: speechId не получен на предыдущем шаге");
   const { status, response } = await call("GET", `/api/v1/speak/${voiceSpeechId}`);
   expect(status === 503 || status === 200, `ожидался 503 или 200, получен ${status}`);
@@ -279,5 +322,5 @@ await check("GET /api/v1/speak/:id — адаптивная проверка (50
   return `аудио получено (${contentType})`;
 });
 
-console.log(`\nИтог: ${passed} ok, ${failed} fail`);
+console.log(`\nИтог: ${passed} ok, ${failed} fail${skipped ? `, ${skipped} skip` : ""}`);
 process.exit(failed ? 1 : 0);

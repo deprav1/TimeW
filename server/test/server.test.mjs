@@ -55,6 +55,13 @@ config.tuyaAccessId = "";
 config.tuyaAccessSecret = "";
 config.tuyaUid = "";
 
+// Same reason, for device auth: deleting process.env.DEVICE_TOKEN above is not
+// enough, because the server reads server/.env itself. On a machine where the
+// gateway has actually been set up, config.token would be the real token and
+// every unauthenticated request in this suite would 401. Tests that need auth
+// set config.token themselves and restore it to this empty baseline.
+config.token = "";
+
 let base;
 
 // Builds a multipart/form-data body by hand (Buffer-only — never a string
@@ -112,6 +119,52 @@ test("GET /health is public and reports demo mode", async () => {
   const body = await res.json();
   assert.equal(body.ok, true);
   assert.equal(body.mode, "demo");
+});
+
+test("GET /api/v1/status is protected and reports capabilities without secrets", async () => {
+  const original = config.token;
+  config.token = "status-secret";
+  try {
+    const denied = await fetch(`${base}/api/v1/status`);
+    assert.equal(denied.status, 401);
+    const res = await fetch(`${base}/api/v1/status`, { headers: { "X-TimeW-Device-Token": "status-secret" } });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.mode, "demo");
+    assert.equal(body.capabilities.notes, true);
+    assert.equal(body.capabilities.homeConfirmation, true);
+    assert.equal("apiKey" in body, false);
+  } finally { config.token = original; }
+});
+
+test("query idempotency key returns the original note and does not duplicate it", async () => {
+  const headers = { "Content-Type": "application/json", "Idempotency-Key": "note-once-1" };
+  const first = await fetch(`${base}/api/v1/query`, { method: "POST", headers, body: JSON.stringify({ text: "Запиши: idempotent note" }) });
+  const second = await fetch(`${base}/api/v1/query`, { method: "POST", headers, body: JSON.stringify({ text: "Запиши: idempotent note" }) });
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  const a = await first.json();
+  const b = await second.json();
+  assert.equal(a.note.id, b.note.id);
+  const notes = await (await fetch(`${base}/api/v1/notes?limit=50`)).json();
+  assert.equal(notes.notes.filter((note) => note.id === a.note.id).length, 1);
+});
+
+test("a confirmation token is single-use", async () => {
+  await withMockTuya(async (req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    if (req.method === "GET" && url.pathname === "/v1.0/token") return tokenHandler("tok-confirm")(res);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ success: true, result: true }));
+  }, async () => {
+    await writeFile(devicesJsonPath, JSON.stringify({ bedroom: ["dev-confirm"] }), "utf8");
+    const prepared = await fetch(`${base}/api/v1/query`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: "включи свет в спальне" }) });
+    const body = await prepared.json();
+    const first = await fetch(`${base}/api/v1/home/confirm`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmationToken: body.confirmationToken }) });
+    const second = await fetch(`${base}/api/v1/home/confirm`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmationToken: body.confirmationToken }) });
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 410);
+  });
 });
 
 test("POST /api/v1/query with a note creates a note visible via GET /api/v1/notes", async () => {
@@ -670,10 +723,18 @@ test("POST /api/v1/query executes a light command via Tuya when devices.json map
       assert.equal(res.status, 200);
       const body = await res.json();
       assert.equal(body.kind, "home");
-      assert.equal(body.executed, true);
-      assert.equal(body.requiresConfirmation, false);
-      assert.equal(body.text, "Выключил свет в спальне");
-      assert.deepEqual(body.devices, ["dev-1"]);
+      assert.equal(body.executed, false);
+      assert.equal(body.requiresConfirmation, true);
+      assert.equal(commandCalls.length, 0, "preparation must not call Tuya");
+      const confirm = await fetch(`${base}/api/v1/home/confirm`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmationToken: body.confirmationToken })
+      });
+      assert.equal(confirm.status, 200);
+      const confirmed = await confirm.json();
+      assert.equal(confirmed.executed, true);
+      assert.equal(confirmed.text, "Выключил свет в спальне");
+      assert.deepEqual(confirmed.devices, ["dev-1"]);
       assert.equal(commandCalls.length, 1, "expected exactly one POST commands call");
       assert.deepEqual(commandCalls[0], { commands: [{ code: "switch_led", value: false }] });
     }
@@ -861,10 +922,16 @@ test("a Tuya API-level error (e.g. device offline) surfaces as a clear 502, not 
     },
     async () => {
       await writeFile(devicesJsonPath, JSON.stringify({ kitchen: ["dev-off"] }), "utf8");
-      const res = await fetch(`${base}/api/v1/query`, {
+      const prepared = await fetch(`${base}/api/v1/query`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: "включи свет на кухне" })
+      });
+      assert.equal(prepared.status, 200);
+      const preparedBody = await prepared.json();
+      const res = await fetch(`${base}/api/v1/home/confirm`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmationToken: preparedBody.confirmationToken })
       });
       assert.equal(res.status, 502);
       const body = await res.json();
@@ -1040,6 +1107,23 @@ test("POST /api/v1/voice?intent=note saves the transcript as a note even without
       assert.equal(body.transcript, "купить фильтр для воды");
     }
   );
+});
+
+test("POST /api/v1/voice?intent=note&preview=1 returns a draft without saving", async () => {
+  const before = await fetch(`${base}/api/v1/notes?limit=50`);
+  const beforeBody = await before.json();
+  const res = await fetch(`${base}/api/v1/voice?intent=note&preview=1`, {
+    method: "POST",
+    headers: { "Content-Type": "audio/opus" },
+    body: Buffer.from([1, 2, 3])
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.kind, "draft");
+  assert.ok(body.transcript);
+  const after = await fetch(`${base}/api/v1/notes?limit=50`);
+  const afterBody = await after.json();
+  assert.equal(afterBody.notes.length, beforeBody.notes.length);
 });
 
 test("intent=note не даёт исполнять домашние команды: приоритет у явного намерения заметки", async () => {

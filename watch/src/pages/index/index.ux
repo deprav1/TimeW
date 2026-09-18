@@ -20,6 +20,7 @@
       <text class="hero-result">{{result}}</text>
     </div>
     <text class="error-banner" if="{{errorText}}">{{errorText}}</text>
+    <text class="setup-banner" if="{{showSetup}}">Шлюз ещё не настроен: задайте адрес и токен в config.js перед сборкой</text>
     <text class="transfer-hint" if="{{transferMode}}">запись ушла способом: {{transferMode}}</text>
     <text class="queue-hint" if="{{hasQueued}}">не отправлено: {{queuedCount}}</text>
 
@@ -37,7 +38,9 @@
       <text class="section-title">Заметки</text>
       <text class="refresh" onclick="refreshNotes">обновить</text>
     </div>
+    <text class="loading-notes" if="{{notesLoading}}">Загружаю заметки…</text>
     <text class="empty-notes" if="{{emptyNotes}}">Заметок пока нет</text>
+    <text class="notes-error" if="{{notesError}}">{{notesError}}</text>
     <text class="notes-hint" if="{{hasNotes}}">удерживайте заметку, чтобы удалить</text>
     <list class="notes-list">
       <list-item for="{{notes}}" class="note-item" type="note" onlongpress="askDelete($item.id)">
@@ -52,8 +55,8 @@
 import prompt from "@system.prompt"
 import vibrator from "@system.vibrator"
 import router from "@system.router"
-import { query, listNotes, voiceUri, deleteNote, resetDialog } from "../../common/api"
-import { recordAudio } from "../../common/audio"
+import { query, listNotes, voiceUri, deleteNote, resetDialog, confirmHome } from "../../common/api"
+import { recordAudio, stopRecording } from "../../common/audio"
 import { loadSettings, getCached } from "../../common/settings"
 import { speak } from "../../common/speech"
 import { isOnline } from "../../common/net"
@@ -132,12 +135,18 @@ export default {
     transferMode: "",
     // Заметки, не ушедшие из-за отсутствия связи и ждущие досылки на часах.
     queuedCount: 0,
-    hasQueued: false
+    hasQueued: false,
+    showSetup: true,
+    notesLoading: false,
+    notesError: "",
+    voiceEpoch: 0,
+    recording: false
   },
 
   onShow() {
     var self = this
     loadSettings(function() {
+      self.showSetup = !getCached().gatewayUrl || !getCached().deviceToken
       loadQueue(function() {
         self.updateQueueCount()
         self.refreshNotes()
@@ -165,7 +174,7 @@ export default {
   flushQueueNow() {
     var self = this
     flush(function(item, onOk, onErr) {
-      query("Запиши: " + item.text, function() { onOk() }, function() { onErr() })
+      query("Запиши: " + item.text, function() { onOk() }, function() { onErr() }, item.requestId)
     }, function(sentCount) {
       self.updateQueueCount()
       if (sentCount > 0) self.refreshNotes()
@@ -186,9 +195,12 @@ export default {
   // тап по статусу возвращает приложение в рабочее состояние.
   unstick() {
     if (!this.busy) return
+    this.voiceEpoch += 1
+    if (this.recording) stopRecording()
+    this.recording = false
     this.setBusy(false)
     this.status = "готов"
-    this.errorText = "Прервано вручную"
+    this.errorText = "Операция отменена"
   },
 
   openSettings() {
@@ -201,7 +213,8 @@ export default {
       uri: "/pages/answer",
       params: {
         text: this.result,
-        source: this.answerSource
+        source: this.answerSource,
+        speechId: this.speechId
       }
     })
   },
@@ -213,13 +226,19 @@ export default {
     var self = this
     if (self.notesBusy) return
     self.notesBusy = true
+    self.notesLoading = true
+    self.emptyNotes = false
+    self.notesError = ""
     listNotes(function(response) {
       self.notes = withTimeLabels(response.notes)
       self.hasNotes = self.notes.length > 0
       self.emptyNotes = self.notes.length === 0
       self.notesBusy = false
+      self.notesLoading = false
     }, function(error) {
       self.notesBusy = false
+      self.notesLoading = false
+      self.notesError = "Не удалось загрузить заметки"
       // Различаем «на часах нет сети» и «шлюз не отвечает»: иначе человек
       // идёт править адрес шлюза, когда достаточно включить Wi-Fi.
       isOnline(function(online) {
@@ -243,6 +262,19 @@ export default {
   // Сбрасывает память диалога на шлюзе, когда хочется начать разговор
   // с чистого листа.
   resetDialogue() {
+    var self = this
+    if (self.busy) return
+    prompt.showDialog({
+      title: "Начать заново?",
+      message: "История разговора будет очищена",
+      buttons: [{ text: "Очистить" }, { text: "Отмена" }],
+      success: function(data) {
+        if (data && data.index === 0) self.resetDialogueConfirmed()
+      }
+    })
+  },
+
+  resetDialogueConfirmed() {
     var self = this
     if (self.busy) return
     self.setBusy(true)
@@ -291,6 +323,7 @@ export default {
   // нужен, а команду светом опасно выполнять задним числом.
   sendText(text, noteText) {
     var self = this
+    var requestKey = noteText ? "timew-note-" + Date.now() + "-" + noteText.length : ""
     if (!text) {
       self.setBusy(false)
       return
@@ -310,15 +343,23 @@ export default {
           self.updateQueueCount()
           self.status = "готов"
           self.errorText = "Нет связи, заметка сохранена на часах"
-        })
+        }, function(queueError) {
+          self.updateQueueCount()
+          self.status = "ошибка"
+          self.errorText = messageFrom(queueError)
+        }, requestKey)
         return
       }
       self.status = "ошибка"
       self.errorText = messageFrom(error)
-    })
+    }, requestKey)
   },
 
   record() {
+    if (this.busy) {
+      this.unstick()
+      return
+    }
     this.startVoice("")
   },
 
@@ -327,12 +368,18 @@ export default {
   startVoice(intent) {
     var self = this
     if (self.busy) return
+    var epoch = self.voiceEpoch + 1
+    self.voiceEpoch = epoch
+    self.recording = true
     self.setBusy(true)
     self.errorText = ""
     self.status = intent === "note" ? "диктуйте заметку…" : "слушаю…"
     recordAudio(function(audio) {
+      if (epoch !== self.voiceEpoch) return
+      self.recording = false
       self.status = "думаю…"
       voiceUri(audio.uri, audio.contentType, intent, function(response, via) {
+        if (epoch !== self.voiceEpoch) return
         self.setBusy(false)
         self.errorText = ""
         self.transferMode = via
@@ -344,16 +391,73 @@ export default {
         }
         self.transcript = recognized
         self.showTitle = false
+
+        if (intent === "note" && response.kind === "draft") {
+          self.status = "проверьте заметку"
+          self.openNoteDraft(recognized)
+          return
+        }
+
+        if (response.kind === "home" && response.requiresConfirmation && response.confirmationToken) {
+          self.applyResponse(response)
+          self.askHomeConfirmation(response)
+          return
+        }
         self.applyResponse(response)
       }, function(error) {
+        if (epoch !== self.voiceEpoch) return
         self.status = "ошибка"
         self.errorText = messageFrom(error)
         self.setBusy(false)
       })
     }, function(error) {
+      if (epoch !== self.voiceEpoch) return
+      self.recording = false
       self.status = "готов"
       self.errorText = messageFrom(error)
       self.setBusy(false)
+    })
+  },
+
+  openNoteDraft(text) {
+    var self = this
+    prompt.showDialog({
+      title: "Сохранить заметку?",
+      message: text,
+      buttons: [{ text: "Сохранить" }, { text: "Отмена" }],
+      success: function(data) {
+        if (data && data.index === 0) {
+          self.sendText("Запиши: " + text, text)
+        } else {
+          self.status = "готов"
+          self.result = "Заметка отменена"
+          self.transcript = ""
+        }
+      }
+    })
+  },
+
+  askHomeConfirmation(response) {
+    var self = this
+    prompt.showDialog({
+      title: "Выполнить команду?",
+      message: response.command ? (response.command.action === "on" ? "Включить" : "Выключить") + " свет" : response.text,
+      buttons: [{ text: "Выполнить" }, { text: "Отмена" }],
+      success: function(data) {
+        if (data && data.index === 0) {
+          self.status = "выполняю…"
+          confirmHome(response.confirmationToken, function(result) {
+            self.status = "готов"
+            self.applyResponse(result)
+          }, function(error) {
+            self.status = "ошибка"
+            self.errorText = messageFrom(error)
+          })
+        } else {
+          self.status = "готов"
+          self.result = "Команда отменена"
+        }
+      }
     })
   },
 
@@ -417,6 +521,9 @@ export default {
 .hero-result { color: #ffffff; font-size: 22px; margin-top: 8px; lines: 3; text-overflow: ellipsis; }
 .hero-hint { color: #6f9fc2; font-size: 12px; margin-top: 6px; }
 .error-banner { color: #ff8f8f; font-size: 13px; margin-top: 10px; lines: 2; text-overflow: ellipsis; }
+.setup-banner { color: #f2c94c; font-size: 13px; margin-top: 8px; lines: 2; text-overflow: ellipsis; }
+.loading-notes { color: #8fa7ca; font-size: 13px; margin-top: 8px; }
+.notes-error { color: #ff8f8f; font-size: 13px; margin-top: 8px; lines: 2; text-overflow: ellipsis; }
 .transfer-hint { color: #6f80a2; font-size: 12px; margin-top: 6px; lines: 1; text-overflow: ellipsis; }
 .queue-hint { color: #f2c94c; font-size: 12px; margin-top: 6px; lines: 1; text-overflow: ellipsis; }
 .main-actions { flex-direction: column; margin-top: 18px; align-items: center; }
@@ -438,7 +545,7 @@ export default {
 .empty-notes { color: #6f80a2; font-size: 13px; margin-top: 8px; }
 .notes-hint { color: #5d6c8c; font-size: 11px; margin-top: 4px; }
 .refresh { color: #70d7ef; font-size: 13px; }
-.note-item { height: 37px; margin-top: 5px; padding-left: 12px; padding-right: 12px; border-radius: 11px; background-color: #141d33; flex-direction: row; justify-content: space-between; align-items: center; }
+.note-item { height: 46px; margin-top: 5px; padding-left: 14px; padding-right: 14px; border-radius: 13px; background-color: #141d33; flex-direction: row; justify-content: space-between; align-items: center; }
 .note-text { color: #eaf1ff; font-size: 16px; lines: 1; text-overflow: ellipsis; flex: 1; }
 .note-time { color: #6f80a2; font-size: 12px; margin-left: 8px; }
 </style>

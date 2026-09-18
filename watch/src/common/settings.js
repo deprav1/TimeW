@@ -1,5 +1,5 @@
 import storage from "@system.storage"
-import { GATEWAY_URL, DEVICE_TOKEN, SPEAK_ANSWERS, AI_PROVIDER, TRANSFER_MODE } from "./config"
+import { GATEWAY_URL, DEVICE_TOKEN, SPEAK_ANSWERS, AI_PROVIDER, TRANSFER_MODE, CONFIG_STAMP } from "./config"
 
 // Настройки живут в @system.storage и переживают перезапуск приложения.
 // config.js задаёт только значения по умолчанию для первой установки.
@@ -11,10 +11,12 @@ var DEFAULTS = {
   // Какой способ доставки записи сработал в прошлый раз: "bytes" или "upload".
   // Проверено в эмуляторе: request.upload молчит, работает чтение файла.
   // На реальной прошивке может быть наоборот, поэтому не зашиваем намертво.
-  transferMode: TRANSFER_MODE
+  transferMode: TRANSFER_MODE,
+  // Метка сборки, из которой пришли текущие адрес и токен.
+  configStamp: CONFIG_STAMP
 }
 
-var KEYS = ["gatewayUrl", "deviceToken", "speakAnswers", "aiProvider", "transferMode"]
+var KEYS = ["gatewayUrl", "deviceToken", "speakAnswers", "aiProvider", "transferMode", "configStamp"]
 
 var cached = copyDefaults()
 
@@ -49,9 +51,27 @@ function fromStored(key, raw) {
 // вложенные колбэки на каждый ключ быстро становятся нечитаемыми.
 // Любая ошибка чтения — не повод зависнуть: подставляем значение по умолчанию
 // и идём дальше, иначе экран настроек никогда не откроется.
+// Новая сборка перекрывает сохранённые адрес и токен. Без этого установка
+// свежего .rpk выглядела бы как «ничего не изменилось»: @system.storage
+// переживает переустановку и продолжал бы отдавать настройки прошлой сборки.
+// Остальные настройки (озвучка, провайдер, способ доставки) — выбор человека
+// на часах, их сборка не трогает.
+function applyBuildConfig(values) {
+  if (values.configStamp === CONFIG_STAMP) return values
+  values.gatewayUrl = GATEWAY_URL
+  values.deviceToken = DEVICE_TOKEN
+  values.configStamp = CONFIG_STAMP
+  // Дозаписываем молча: если storage недоступен, человек всё равно работает
+  // с правильными значениями, просто сверка повторится при следующем старте.
+  ;["gatewayUrl", "deviceToken", "configStamp"].forEach(function(key) {
+    storage.set({ key: key, value: toStored(key, values[key]), success: function() {}, fail: function() {} })
+  })
+  return values
+}
+
 function readKeys(index, accumulator, done) {
   if (index >= KEYS.length) {
-    cached = accumulator
+    cached = applyBuildConfig(accumulator)
     done(cached)
     return
   }

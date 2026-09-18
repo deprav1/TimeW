@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "setup": "node scripts/setup.mjs",
     "start": "node src/server.mjs",
     "test": "node --test",
     "smoke": "node scripts/smoke.mjs"

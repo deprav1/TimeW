@@ -4,9 +4,14 @@
   "private": true,
   "engines": { "node": ">=8.10" },
   "scripts": {
+    "prestart": "node scripts/prepare.mjs",
     "start": "aiot start --watch",
+    "prebuild": "node scripts/prepare.mjs --bump",
     "build": "aiot build",
-    "release": "aiot release"
+    "postbuild": "node scripts/show-rpk.mjs",
+    "prerelease": "node scripts/prepare.mjs --bump",
+    "release": "aiot release",
+    "postrelease": "node scripts/show-rpk.mjs"
   },
   "devDependencies": {
     "@aiot-toolkit/jsc": "^1.0.3",

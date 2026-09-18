@@ -1,5 +1,8 @@
 server/data/
 server/.env
+# Адрес шлюза и токен устройства для сборки часов: генерируется
+# `npm run setup` в server/, содержит секрет, в репозиторий не попадает.
+watch/src/common/config.local.js
 watch/node_modules/
 watch/dist/
 watch/build/

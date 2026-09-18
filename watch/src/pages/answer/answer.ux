@@ -4,6 +4,9 @@
       <text class="brand">{{sourceLabel}}</text>
       <text class="back" onclick="goBack">назад</text>
     </div>
+    <div class="answer-actions">
+      <div class="action-button" onclick="repeat"><text class="action-label">повторить</text></div>
+    </div>
     <!-- В этой версии Vela статический list-item не рендерится. Один
          элемент тоже передаём через for, как на главном экране. -->
     <list class="answer-list">
@@ -16,6 +19,7 @@
 
 <script>
 import router from "@system.router"
+import { speak, stopSpeaking } from "../../common/speech"
 
 function labelForSource(source) {
   if (source === "ai") return "ОТВЕТ ИИ"
@@ -28,12 +32,14 @@ function labelForSource(source) {
 export default {
   protected: {
     text: "",
-    source: ""
+    source: "",
+    speechId: ""
   },
 
   private: {
     sourceLabel: "ОТВЕТ",
-    blocks: []
+    blocks: [],
+    speaking: false
   },
 
   onInit() {
@@ -43,6 +49,22 @@ export default {
 
   goBack() {
     router.back()
+  },
+
+  repeat() {
+    var self = this
+    if (!self.speechId) return
+    if (self.speaking) {
+      stopSpeaking()
+      self.speaking = false
+      return
+    }
+    self.speaking = true
+    speak(self.speechId, function() {
+      self.speaking = false
+    }, function() {
+      self.speaking = false
+    })
   }
 }
 </script>
@@ -56,4 +78,7 @@ export default {
 .answer-list { flex: 1; width: 100%; margin-top: 14px; }
 .answer-item { padding: 16px; padding-bottom: 34px; border-radius: 18px; background-color: #141d33; }
 .answer-text { color: #eaf1ff; font-size: 18px; }
+.answer-actions { flex-direction: row; justify-content: center; margin-top: 10px; }
+.action-button { min-width: 150px; height: 44px; padding-left: 14px; padding-right: 14px; border-radius: 14px; background-color: #202b45; justify-content: center; align-items: center; }
+.action-label { color: #d9e6ff; font-size: 15px; }
 </style>
