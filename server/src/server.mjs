@@ -143,6 +143,56 @@ function ttsAvailable() {
   return Boolean(config.ttsApiKey && config.ttsProvider === "openai-compatible");
 }
 
+// Тип аудио определяется по самим байтам, а не по тому, что заявили часы.
+//
+// Причина из практики: рантайм Vela отдаёт путь к файлу, а расширение у него
+// не всегда говорит правду. Когда часы не смогли распознать формат, они
+// присылали application/octet-stream — такого типа в списке Gemini нет, и
+// запрос отклонялся с «invalid argument», хотя запись была нормальной.
+//
+// Неизвестный формат не выдаём за поддерживаемый: пишем в лог первые байты,
+// чтобы по следующему обращению стало понятно, что именно записывают часы.
+const GEMINI_AUDIO_TYPES = new Set([
+  "audio/wav", "audio/mp3", "audio/mpeg", "audio/aiff", "audio/aac", "audio/ogg",
+  "audio/flac", "audio/m4a", "audio/l16", "audio/opus", "audio/alaw", "audio/mulaw", "audio/webm"
+]);
+
+function detectAudioMime(bytes, declared) {
+  const head = bytes.subarray(0, 12);
+  const ascii = head.toString("latin1");
+  if (ascii.startsWith("OggS")) return "audio/ogg";
+  if (ascii.startsWith("RIFF") && ascii.includes("WAVE")) return "audio/wav";
+  if (ascii.startsWith("fLaC")) return "audio/flac";
+  if (ascii.startsWith("#!AMR")) return "audio/amr";
+  if (ascii.startsWith("ID3")) return "audio/mpeg";
+  if (head[0] === 0xff && (head[1] & 0xe0) === 0xe0) return "audio/mpeg";
+  if (ascii.slice(4, 8) === "ftyp") return "audio/m4a";
+  if (ascii.startsWith("FORM") && ascii.includes("AIFF")) return "audio/aiff";
+  if (declared && GEMINI_AUDIO_TYPES.has(declared)) return declared;
+  return null;
+}
+
+// Возвращает тип, пригодный для Gemini, либо внятную ошибку. Отдельно
+// оговорён AMR: часы некоторых прошивок пишут именно в нём, а Gemini его не
+// принимает — молчаливый отказ тут хуже прямого объяснения.
+function audioMimeForGemini(bytes, declared) {
+  const detected = detectAudioMime(bytes, declared);
+  if (detected === "audio/amr") {
+    const err = new Error("Watch recorded AMR, which Gemini does not accept");
+    err.statusCode = 415;
+    err.publicMessage = "Часы записали в формате AMR, его распознавание не принимает";
+    err.code = "unsupported_audio";
+    throw err;
+  }
+  if (detected) return detected;
+  console.error(`[${new Date().toISOString()}] неизвестный формат записи: заявлен ${declared || "ничего"}, первые байты ${bytes.subarray(0, 12).toString("hex")}`);
+  const err = new Error(`Unrecognized audio format (declared ${declared || "none"})`);
+  err.statusCode = 415;
+  err.publicMessage = "Не удалось распознать формат записи";
+  err.code = "unsupported_audio";
+  throw err;
+}
+
 function publicMode() {
   return config.provider === "mock" || !config.apiKey ? "demo" : "live";
 }
@@ -865,7 +915,7 @@ async function providerTranscribe(audio, contentType, { provider = config.provid
       body: JSON.stringify({
         contents: [{ role: "user", parts: [
           { text: "Точно расшифруй русскую речь из аудио. Верни только распознанный текст без пояснений." },
-          { inlineData: { mimeType: contentType || "audio/opus", data: audio.toString("base64") } }
+          { inlineData: { mimeType: audioMimeForGemini(audio, contentType), data: audio.toString("base64") } }
         ] }],
         generationConfig: {
           maxOutputTokens: 256,
@@ -910,7 +960,7 @@ async function providerVoiceGemini(audioBytes, contentType, history) {
             "Затем ответь на распознанный вопрос по-русски, коротко и понятно для экрана часов, без markdown, в поле answer. " +
             "Верни строго JSON по заданной схеме."
         },
-        { inlineData: { mimeType: contentType || "audio/opus", data: audioBytes.toString("base64") } }
+        { inlineData: { mimeType: audioMimeForGemini(audioBytes, contentType), data: audioBytes.toString("base64") } }
       ]
     }
   ];

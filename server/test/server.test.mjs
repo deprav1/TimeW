@@ -1683,3 +1683,102 @@ test("статус сообщает, что озвучка доступна, к�
   const body = await (await fetch(`${base}/api/v1/status`)).json();
   assert.equal(body.capabilities.speech, true, "иначе часы напишут, что озвучка не настроена");
 });
+
+// --- Определение формата записи ------------------------------------------
+//
+// Часы присылали application/octet-stream, и Gemini отклонял запрос с
+// «invalid argument» — запись при этом была нормальной. Поэтому формат
+// определяется по байтам, а не по заявленному типу.
+
+test("Ogg-запись распознаётся, даже если часы заявили octet-stream", async () => {
+  const ogg = Buffer.concat([Buffer.from("OggS"), Buffer.alloc(60)]);
+  let sentMime = null;
+  await withMockGemini(
+    (req, res) => {
+      let raw = "";
+      req.on("data", (c) => { raw += c; });
+      req.on("end", () => {
+        const body = JSON.parse(raw);
+        const part = body.contents[0].parts.find((p) => p.inlineData);
+        sentMime = part.inlineData.mimeType;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify({ transcript: "привет", answer: "привет" }) }] } }] }));
+      });
+    },
+    async () => {
+      const original = config.provider;
+      config.provider = "gemini";
+      try {
+        const res = await fetch(`${base}/api/v1/voice`, {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: ogg
+        });
+        assert.equal(res.status, 200);
+        assert.equal(sentMime, "audio/ogg", "иначе провайдер отклонит запись как неизвестную");
+      } finally { config.provider = original; }
+    }
+  );
+});
+
+test("WAV распознаётся по заголовку", async () => {
+  const wav = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WAVEfmt "), Buffer.alloc(40)]);
+  let sentMime = null;
+  await withMockGemini(
+    (req, res) => {
+      let raw = "";
+      req.on("data", (c) => { raw += c; });
+      req.on("end", () => {
+        sentMime = JSON.parse(raw).contents[0].parts.find((p) => p.inlineData).inlineData.mimeType;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify({ transcript: "тест", answer: "тест" }) }] } }] }));
+      });
+    },
+    async () => {
+      const original = config.provider;
+      config.provider = "gemini";
+      try {
+        await fetch(`${base}/api/v1/voice`, { method: "POST", headers: { "Content-Type": "audio/wav" }, body: wav });
+        assert.equal(sentMime, "audio/wav");
+      } finally { config.provider = original; }
+    }
+  );
+});
+
+test("неизвестный формат даёт понятный отказ, а не «invalid argument» от провайдера", async () => {
+  const garbage = Buffer.from([0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c]);
+  await withMockGemini(
+    (req, res) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end("{}"); },
+    async () => {
+      const original = config.provider;
+      config.provider = "gemini";
+      try {
+        const res = await fetch(`${base}/api/v1/voice`, {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: garbage
+        });
+        assert.equal(res.status, 415);
+        const body = await res.json();
+        assert.equal(body.error.code, "unsupported_audio");
+      } finally { config.provider = original; }
+    }
+  );
+});
+
+test("AMR отклоняется с объяснением: Gemini его не принимает", async () => {
+  const amr = Buffer.concat([Buffer.from("#!AMR\n"), Buffer.alloc(30)]);
+  await withMockGemini(
+    (req, res) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end("{}"); },
+    async () => {
+      const original = config.provider;
+      config.provider = "gemini";
+      try {
+        const res = await fetch(`${base}/api/v1/voice`, { method: "POST", headers: { "Content-Type": "audio/amr" }, body: amr });
+        assert.equal(res.status, 415);
+        const body = await res.json();
+        assert.match(body.error.message, /AMR/);
+      } finally { config.provider = original; }
+    }
+  );
+});

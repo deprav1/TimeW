@@ -36,6 +36,7 @@ import file from "@system.file"
 import { loadSettings, getCached } from "../../common/settings"
 import { networkType } from "../../common/net"
 import { sendDiagnostics } from "../../common/api"
+import { recordAudio } from "../../common/audio"
 import { CONFIG_STAMP } from "../../common/config"
 
 // Опрос рантайма: какие методы на самом деле есть на этой прошивке.
@@ -167,7 +168,7 @@ export default {
     ]
     if (index >= targets.length) {
       report.tls = self.tlsResults
-      self.finish(report)
+      self.probeRecording(report)
       return
     }
     if (index === 0) self.tlsResults = []
@@ -176,6 +177,44 @@ export default {
       self.tlsResults.push({ name: target.name, status: result.status, ms: result.ms, error: result.error })
       self.add(target.name, (result.status ? "код " + result.status : "не дошёл") + (result.error ? " — " + result.error : ""))
       self.probeTls(report, index + 1)
+    })
+  },
+
+  // Короткая пробная запись: какой формат на самом деле выдаёт рантайм.
+  // Расширение файла врёт — из-за этого шлюз отправлял провайдеру
+  // application/octet-stream, и запись отклонялась.
+  probeRecording(report) {
+    var self = this
+    self.add("запись", "пробую…")
+    recordAudio(function(audio) {
+      report.recordUri = audio.uri
+      report.recordType = audio.contentType
+      file.readArrayBuffer({
+        uri: audio.uri,
+        success: function(data) {
+          var bytes = data && (data.buffer || data)
+          var size = bytes ? (bytes.byteLength || bytes.length || 0) : 0
+          var head = ""
+          try {
+            var view = new Uint8Array(bytes)
+            for (var i = 0; i < 8 && i < view.length; i++) {
+              var h = view[i].toString(16)
+              head += (h.length < 2 ? "0" + h : h)
+            }
+          } catch (error) { head = "не прочитать" }
+          report.recordSize = size
+          report.recordHead = head
+          self.add("запись", size + " байт, тип " + audio.contentType + ", байты " + head)
+          self.finish(report)
+        },
+        fail: function() {
+          self.add("запись", "файл не прочитался: " + audio.uri)
+          self.finish(report)
+        }
+      })
+    }, function(error) {
+      self.add("запись", "не удалась: " + ((error && error.message) || "ошибка"))
+      self.finish(report)
     })
   },
 
