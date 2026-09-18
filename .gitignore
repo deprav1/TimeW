@@ -10,3 +10,4 @@ server/node_modules/
 .temp_watch/
 .research-open-vela-docs/
 .claude/settings.local.json
+deno.lock
