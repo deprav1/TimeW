@@ -122,7 +122,9 @@ export default {
     providerDisplay: "авто (как на шлюзе)",
     checkResult: "",
     errorText: "",
-    networkDisplay: "…"
+    networkDisplay: "…",
+    // Каким путём шла последняя проверка связи — попадает в её результат.
+    checkVia: ""
   },
 
   onInit() {
@@ -159,6 +161,14 @@ export default {
     this.providerDisplay = labelForProvider(this.aiProvider)
   },
 
+  // Проверка отвечает на три вопроса сразу, потому что по отдельности они
+  // бесполезны: есть ли у часов сеть и какая, доходим ли до шлюза, принят ли
+  // токен. Раньше любая из трёх причин выглядела одинаково — «не удалось
+  // связаться», — и человек шёл чинить не то.
+  //
+  // Тип сети здесь особенно важен: если он оказывается «через телефон» и
+  // проверка проходит, значит часам не нужен Wi-Fi, и шлюзу место в интернете,
+  // а не в домашней сети (docs/architecture.md).
   checkConnection() {
     var self = this
     if (!isValidUrl(self.gatewayUrl)) {
@@ -168,6 +178,20 @@ export default {
     }
     self.errorText = ""
     self.checkResult = "проверяю…"
+    networkType(function(type) {
+      self.networkDisplay = labelForNetwork(type)
+      self.checkVia = labelForNetwork(type)
+      if (type === "none") {
+        self.checkResult = ""
+        self.errorText = "На часах нет сети. Включите Wi-Fi или держите телефон рядом"
+        return
+      }
+      self.checkGateway()
+    })
+  },
+
+  checkGateway() {
+    var self = this
     var finished = false
     var timer = setTimeout(function() {
       if (finished) return
@@ -202,12 +226,21 @@ export default {
           return
         }
         var mode = parsed && parsed.mode ? parsed.mode : "unknown"
-        self.checkResult = "шлюз на связи, режим " + mode
+        // Главная строка проверки: видно, каким путём часы дошли до шлюза.
+        self.checkResult = "связь есть (" + self.checkVia + "), режим " + mode
       }),
       fail: settle(function(error) {
         self.checkResult = ""
         var status = statusFrom(error)
-        self.errorText = status === 401 ? "Неверный токен устройства" : messageFrom(error)
+        if (status === 401) {
+          self.errorText = "Неверный токен устройства"
+          return
+        }
+        // Сеть на часах есть, а шлюз не отвечает. Для пути через телефон это
+        // почти всегда означает домашний адрес шлюза: снаружи он не виден.
+        self.errorText = self.checkVia === "через телефон"
+          ? "Сеть через телефон есть, но шлюз недоступен — нужен адрес, видимый из интернета"
+          : messageFrom(error)
       })
     }) } catch (error) {
       settle(function() { self.checkResult = ""; self.errorText = messageFrom(error) })()
