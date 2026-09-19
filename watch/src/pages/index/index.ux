@@ -1,44 +1,47 @@
 <template>
-  <!-- Круглый экран 480×480. Ширина полезной области зависит от высоты:
-       у самого верха и низа круг сужается примерно до 250px, в середине
-       даёт все 480. Поэтому всё выравнено по центру, боковые отступы
-       крупные, а главная кнопка стоит там, где круг широкий.
-       Проверено фотографией с устройства: текст, начинавшийся у левого
-       края, срезало — «Личный помощник» превращался в «ичный помощник». -->
+  <!-- Круглый экран 480×480. Ширина полезной полосы зависит от высоты:
+       на y=46 круг даёт 282px, на y=114 уже 408, в середине все 480, на
+       y=434 снова 282. Поэтому экран разложен трапецией: узкие ряды сверху
+       и снизу, широкие — в середине. Каждый блок занимает всю доступную
+       на своей высоте ширину: пустого места на часах быть не должно.
+       Мелких подписей-ссылок больше нет — по ним не попасть пальцем. -->
   <div class="page">
-    <text class="status">{{status}}</text>
+    <!-- Переходы наверху: нужны редко, поэтому стоят в узкой верхней
+         полосе, но остаются кнопками, а не текстом. -->
+    <div class="nav-row">
+      <div class="nav-button" onclick="openNotes"><text class="nav-label">Заметки</text></div>
+      <div class="nav-button" onclick="openSettings"><text class="nav-label">Настройки</text></div>
+    </div>
 
     <!-- Область ответа — тоже цель для пальца: когда ответа ещё нет, тап по
          ней начинает разговор. На часах промахнуться мимо кнопки легко, а
-         промахнуться мимо половины экрана — нет. -->
+         промахнуться мимо трети экрана — нет.
+         Верхняя строка совмещает состояние и распознанный текст: отдельная
+         строка «услышал» не помещалась, не срезав ответ. -->
     <div class="answer-area" onclick="tapAnswer">
-      <text class="heard" if="{{transcript}}">{{transcript}}</text>
+      <text class="status">{{status}}</text>
       <text class="answer">{{result}}</text>
       <text class="read-more" if="{{hasAnswer}}" onclick="openAnswer">читать полностью →</text>
+      <text class="error" if="{{errorText}}">{{errorText}}</text>
     </div>
 
-    <!-- Одна большая круглая цель: на часах палец закрывает пол-экрана,
-         и мелкие кнопки просто не нажимаются. -->
+    <!-- Главное действие занимает всю ширину, какую круг даёт на этой
+         высоте. -->
     <div class="{{talkClass}}" onclick="talk">
       <text class="talk-label">{{talkLabel}}</text>
     </div>
 
+    <!-- Нижний ряд меняет содержимое, но не высоту: иначе при отмене или
+         откате вся колонка съезжала бы под рамку. -->
     <div class="quick-row" if="{{showQuick}}">
       <div class="quick-button home-button" onclick="startHome"><text class="quick-label">{{homeLabel}}</text></div>
       <div class="quick-button note-button" onclick="startNote"><text class="quick-label">Заметка</text></div>
     </div>
     <div class="quick-row" if="{{undoToken}}">
-      <div class="quick-button undo-button" onclick="undoLast"><text class="quick-label">Отменить действие</text></div>
+      <div class="wide-button undo-button" onclick="undoLast"><text class="quick-label">Отменить действие</text></div>
     </div>
-
-    <div class="cancel-button" if="{{showCancel}}" onclick="unstick"><text class="cancel-label">Отменить</text></div>
-
-    <text class="error" if="{{errorText}}">{{errorText}}</text>
-
-    <div class="bottom-row">
-      <text class="link" onclick="openNotes">заметки</text>
-      <text class="link" if="{{hasAnswer}}" onclick="resetDialogue">заново</text>
-      <text class="link" onclick="openSettings">настр.</text>
+    <div class="quick-row" if="{{showCancel}}">
+      <div class="wide-button cancel-button" onclick="unstick"><text class="quick-label">Отменить</text></div>
     </div>
   </div>
 </template>
@@ -47,7 +50,7 @@
 import prompt from "@system.prompt"
 import vibrator from "@system.vibrator"
 import router from "@system.router"
-import { query, voiceUri, voiceBytes, status as fetchStatus, resetDialog, confirmHome, undoHome } from "../../common/api"
+import { query, voiceUri, voiceBytes, status as fetchStatus, confirmHome, undoHome } from "../../common/api"
 import { recordAudio, stopRecording, cancelRecording } from "../../common/audio"
 import { loadSettings, getCached, getRecordingSettings, applyRemoteRuntime } from "../../common/settings"
 import { speak } from "../../common/speech"
@@ -63,7 +66,6 @@ export default {
   private: {
     status: "готов",
     result: "Нажмите и спросите",
-    transcript: "",
     errorText: "",
     busy: false,
     talkClass: "talk-button",
@@ -154,7 +156,7 @@ export default {
   },
 
   // Системному диалогу таймаут не поставишь — человек думает сколько угодно.
-  // Поэтому тап по статусу всегда возвращает приложение в рабочее состояние.
+  // Поэтому «Отменить» всегда возвращает приложение в рабочее состояние.
   unstick() {
     if (!this.busy) return
     this.voiceEpoch += 1
@@ -180,7 +182,7 @@ export default {
   },
 
   // Пока ответа нет, тап по центру экрана означает «хочу спросить».
-  // Когда ответ есть — открывает его целиком: короткий текст на круглом
+  // Когда ответ есть — открывает его целиком: длинный текст на круглом
   // экране обрезается, и прочитать остальное иначе негде.
   tapAnswer() {
     if (this.busy || this.recording) {
@@ -270,7 +272,6 @@ export default {
     self.recording = true
     self.setBusy(true)
     self.errorText = ""
-    self.transcript = ""
     self.talkLabel = "Готово"
     self.result = getRecordingSettings().autoStop ? "Говорите — закончу сам" : "Нажмите, когда договорите"
     self.status = "говорите · " + Math.round(getRecordingSettings().maxRecordingMs / 1000)
@@ -288,7 +289,6 @@ export default {
         self.stopTicker()
         self.setBusy(false)
         self.errorText = ""
-        self.transcript = response.transcript || ""
 
         if (response.kind === "home" && response.requiresConfirmation && response.confirmationToken) {
           self.applyResponse(response)
@@ -333,7 +333,9 @@ export default {
   },
 
   applyResponse(response) {
-    this.status = "готов"
+    // Распознанный текст занимает строку состояния: отдельной строки под
+    // него на круглом экране нет, а знать, что именно услышали часы, нужно.
+    this.status = response.transcript ? "услышал: " + response.transcript : "готов"
     this.result = response.text || "Готово"
     this.errorText = ""
     this.hasAnswer = !!response.text
@@ -401,90 +403,65 @@ export default {
         }
       }
     })
-  },
-
-  resetDialogue() {
-    var self = this
-    if (self.busy) return
-    prompt.showDialog({
-      title: "Начать заново?",
-      message: "История разговора будет очищена",
-      buttons: [{ text: "Очистить" }, { text: "Отмена" }],
-      success: function(data) {
-        if (!data || data.index !== 0) return
-        self.setBusy(true)
-        resetDialog(function() {
-          self.stopTicker()
-          self.setBusy(false)
-          self.status = "готов"
-          self.transcript = ""
-          self.result = "Нажмите и спросите"
-          self.hasAnswer = false
-          self.errorText = ""
-          self.updateTalkLabel()
-        }, function(error) {
-          self.stopTicker()
-          self.setBusy(false)
-          self.status = "ошибка"
-          self.errorText = messageFrom(error)
-        })
-      }
-    })
   }
 }
 </script>
 
 <style>
-/* flex-direction задаём явно: div в Vela по умолчанию раскладывает детей
-   в строку, и без этого заголовок с текстом встают рядом. */
+/* Страница всегда во весь экран: при меньшей ширине рантайм прижимает
+   содержимое влево, и на круглом экране левый край уходит под рамку.
+   flex-direction задаём явно: div в Vela по умолчанию раскладывает детей
+   в строку. */
 .page {
+  width: 480px; height: 480px;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   background-color: #0b1020;
-  padding-left: 40px;
-  padding-right: 40px;
-  padding-top: 20px;
-  padding-bottom: 14px;
 }
 
-/* Статус — он же аварийный размыкатель: тап снимает залипшее состояние. */
-.status { color: #7de3ff; font-size: 17px; height: 20px; text-align: center; }
+/* Верхняя полоса: на этой высоте круг даёт 282px. */
+.nav-row { flex-direction: row; justify-content: center; align-items: center; height: 68px; }
+.nav-button { width: 134px; height: 68px; border-radius: 20px; background-color: #22314e; justify-content: center; align-items: center; margin-left: 4px; margin-right: 4px; }
+.nav-label { color: #cfe0f7; font-size: 17px; font-weight: bold; text-align: center; }
 
-.answer-area { flex-direction: column; align-items: center; width: 100%; height: 132px; margin-top: 4px; }
-.heard { color: #6f9fc2; font-size: 15px; lines: 1; text-overflow: ellipsis; text-align: center; width: 100%; }
-.answer { color: #ffffff; font-size: 27px; lines: 3; text-overflow: ellipsis; text-align: center; width: 100%; margin-top: 4px; }
-.read-more { color: #70d7ef; font-size: 17px; margin-top: 4px; }
+/* Середина экрана — самая широкая часть круга, здесь 400px проходят. */
+.answer-area { flex-direction: column; align-items: center; justify-content: center; width: 400px; height: 122px; margin-top: 4px; }
+.status { color: #7de3ff; font-size: 17px; height: 22px; width: 340px; lines: 1; text-overflow: ellipsis; text-align: center; }
+.answer { color: #ffffff; font-size: 27px; lines: 2; text-overflow: ellipsis; text-align: center; width: 400px; }
+.read-more { color: #70d7ef; font-size: 17px; height: 24px; text-align: center; }
+.error { color: #ff8f8f; font-size: 16px; height: 24px; lines: 1; text-align: center; width: 380px; text-overflow: ellipsis; }
 
-/* 200×200 — палец попадает не глядя. Составные селекторы в этой сборке Vela
-   не работают, поэтому у занятого состояния отдельный самостоятельный класс,
-   а класс биндится целиком. */
+/* Заливка только сплошным цветом. linear-gradient рантайм не рисует вовсе:
+   кнопка оставалась прозрачной, а тёмная подпись на тёмном фоне исчезала.
+   box-shadow на устройстве превращался в широкое кольцо вокруг невидимой
+   кнопки — то самое «кольцо, съедающее центр» с фотографии.
+   Составные селекторы в этой сборке Vela не работают, поэтому у занятого
+   состояния отдельный самостоятельный класс, а класс биндится целиком. */
 .talk-button {
-  width: 162px; height: 162px; border-radius: 81px;
-  background-color: #2b9ec2;
+  width: 400px; height: 116px; border-radius: 40px;
+  background-color: #31b2d8;
   justify-content: center; align-items: center;
-  margin-top: 5px;
+  margin-top: 4px;
 }
 .talk-busy {
-  width: 162px; height: 162px; border-radius: 81px;
-  background-color: #1b5f75;
+  width: 400px; height: 116px; border-radius: 40px;
+  background-color: #6f8aa6;
   justify-content: center; align-items: center;
-  margin-top: 5px;
+  margin-top: 4px;
 }
-.talk-label { color: #07111e; font-size: 25px; font-weight: bold; text-align: center; }
+.talk-label { color: #07111e; font-size: 30px; font-weight: bold; text-align: center; }
 
-.quick-row { flex-direction: row; justify-content: center; align-items: center; height: 48px; margin-top: 7px; }
-.quick-button { width: 118px; height: 44px; border-radius: 15px; justify-content: center; align-items: center; margin-left: 5px; margin-right: 5px; }
+/* Нижняя полоса: круг здесь снова 282px, поэтому ряд не шире 276. */
+.quick-row { flex-direction: row; justify-content: center; align-items: center; height: 74px; margin-top: 4px; }
+.quick-button { width: 134px; height: 74px; border-radius: 22px; justify-content: center; align-items: center; margin-left: 4px; margin-right: 4px; }
+.wide-button { width: 276px; height: 74px; border-radius: 22px; justify-content: center; align-items: center; }
 .home-button { background-color: #d59b58; }
-.note-button { background-color: #355273; }
-.undo-button { width: 246px; background-color: #b85e66; }
-.quick-label { color: #07111e; font-size: 17px; font-weight: bold; text-align: center; }
-.cancel-button { width: 180px; height: 40px; border-radius: 14px; background-color: #24344f; justify-content: center; align-items: center; margin-top: 7px; }
-.cancel-label { color: #d9e6ff; font-size: 16px; }
-
-.error { color: #ff8f8f; font-size: 14px; margin-top: 5px; lines: 1; text-align: center; width: 100%; text-overflow: ellipsis; }
-
-/* Нижний ряд стоит там, где круг уже сузился примерно до 265px, поэтому
-   подписи короткие и с запасом по краям. */
-.bottom-row { flex-direction: row; justify-content: center; align-items: center; margin-top: 8px; height: 26px; }
-.link { color: #70d7ef; font-size: 17px; padding-left: 10px; padding-right: 10px; }
+.note-button { background-color: #7fa6cc; }
+.undo-button { background-color: #d98a91; }
+/* Светлая заливка и у отмены: подпись во всех кнопках этого ряда тёмная,
+   а на тёмном фоне она просто исчезает — этим уже один раз пропала
+   главная кнопка. */
+.cancel-button { background-color: #9fb3cc; }
+.quick-label { color: #07111e; font-size: 18px; font-weight: bold; text-align: center; }
 </style>

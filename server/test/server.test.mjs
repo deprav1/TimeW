@@ -1596,6 +1596,72 @@ test("GET /api/v1/speak/test synthesizes a fixed phrase and takes no text from t
   );
 });
 
+// Часы не могут скачать аудио файлом: request.download на Watch S5 отвечает
+// кодом 1000 тринадцать опросов подряд. Работает только текстовый транспорт,
+// поэтому те же ручки умеют отдать звук строкой base64, а заодно проредить
+// его до 8 кГц — на часах каждый лишний килобайт лежит в куче JS.
+test("GET /api/v1/speak/test?as=base64 отдаёт тот же звук строкой", async (t) => {
+  const originalFormat = config.ttsFormat;
+  config.ttsFormat = "mp3";
+  t.after(() => { config.ttsFormat = originalFormat; });
+  const fakeAudio = Buffer.from([0xff, 0xfb, 0x90, 0x00, 9, 9]);
+  await withMockOpenAI(
+    async (req, res) => {
+      res.writeHead(200, { "Content-Type": "audio/mpeg" });
+      res.end(fakeAudio);
+    },
+    async () => {
+      const res = await fetch(`${base}/api/v1/speak/test?format=mp3&as=base64`);
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.ok, true);
+      assert.equal(body.truncated, false);
+      assert.equal(Buffer.compare(Buffer.from(body.audioBase64, "base64"), fakeAudio), 0);
+    }
+  );
+});
+
+// Прореживание касается только того, что часам и правда тяжело: моно PCM
+// 16 бит. Чужой контейнер (mp3) остаётся как есть, иначе испортили бы файл.
+test("rate прореживает WAV втрое и не трогает другие форматы", async (t) => {
+  const originalFormat = config.ttsFormat;
+  config.ttsFormat = "mp3";
+  t.after(() => { config.ttsFormat = originalFormat; });
+  const pcm = Buffer.alloc(24000 * 2);
+  for (let i = 0; i < 24000; i++) pcm.writeInt16LE(((i % 100) - 50) * 200, i * 2);
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(24000, 24);
+  header.writeUInt32LE(48000, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(pcm.length, 40);
+  const wav = Buffer.concat([header, pcm]);
+
+  await withMockOpenAI(
+    async (req, res) => {
+      res.writeHead(200, { "Content-Type": "audio/wav" });
+      res.end(wav);
+    },
+    async () => {
+      const res = await fetch(`${base}/api/v1/speak/test?format=wav&as=base64&rate=8000`);
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      const audio = Buffer.from(body.audioBase64, "base64");
+      assert.equal(audio.readUInt32LE(24), 8000, "частота в заголовке пересчитана");
+      assert.ok(audio.length < wav.length / 2.5, `ожидали втрое меньше, вышло ${audio.length} против ${wav.length}`);
+      assert.equal(audio.toString("ascii", 0, 4), "RIFF", "файл остался WAV");
+    }
+  );
+});
+
 test("GET /api/v1/speak/test says so plainly when synthesis is not configured", async () => {
   const res = await fetch(`${base}/api/v1/speak/test`);
   assert.equal(res.status, 503);

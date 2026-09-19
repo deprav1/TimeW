@@ -2,7 +2,7 @@
 // ведёт себя, когда шлюз отвечает ошибкой, отвечает мусором или молчит.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fetchModule, file, storage, resetAll } from "../testkit/system.mjs";
+import { fetchModule, file, storage, uploadtask, resetAll } from "../testkit/system.mjs";
 
 const { loadSettings } = await import("../src/common/settings.js");
 const { query, voiceUri, voiceBytes, status, listNotes, deleteNote, confirmHome, undoHome } = await import("../src/common/api.js");
@@ -10,15 +10,38 @@ const { query, voiceUri, voiceBytes, status, listNotes, deleteNote, confirmHome,
 const GATEWAY = "http://gateway.test:8787";
 const TOKEN = "тестовый-токен";
 
-async function ready() {
+async function ready(transferMode) {
   resetAll();
   storage.data.gatewayUrl = GATEWAY;
   storage.data.deviceToken = TOKEN;
   const { CONFIG_STAMP } = await import("../src/common/config.js");
   storage.data.configStamp = CONFIG_STAMP;
+  if (transferMode) storage.data.transferMode = transferMode;
   await new Promise((resolve) => loadSettings(resolve));
   fetchModule.reset();
 }
+
+test("uploadtask не включается автоматически без физически подтверждённого профиля", async () => {
+  await ready();
+  file.files["internal://cache/a.opus"] = new ArrayBuffer(64);
+  fetchModule.scripted.push(ok({ kind: "ai", text: "ответ" }));
+  await new Promise((done, fail) => voiceUri("internal://cache/a.opus", "audio/opus", "", done, fail));
+  assert.equal(uploadtask.calls.length, 0);
+});
+
+test("явно выбранный uploadtask принимает документированный statusCode/data контракт", async () => {
+  await ready("uploadtask");
+  uploadtask.scripted.push({
+    response: { statusCode: 200, data: JSON.stringify({ ok: true, kind: "ai", text: "ответ" }) }
+  });
+  const body = await new Promise((done, fail) => {
+    voiceUri("internal://cache/a.opus", "audio/opus", "", done, fail, { requestKey: "uploadtask-1", recordedMs: 1234 });
+  });
+  assert.equal(body.text, "ответ");
+  assert.equal(uploadtask.calls.length, 1);
+  assert.equal(uploadtask.calls[0].header["Idempotency-Key"], "uploadtask-1");
+  assert.equal(uploadtask.calls[0].header["X-TimeW-Record-Ms"], "1234");
+});
 
 function ok(body) {
   return { response: { code: 200, data: JSON.stringify({ ok: true, ...body }) } };

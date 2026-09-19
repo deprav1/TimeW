@@ -1,32 +1,30 @@
 <template>
   <div class="page">
-    <div class="topbar">
-      <text class="title">ДИАГНОСТИКА</text>
-      <text class="back" onclick="goBack">назад</text>
+    <!-- Верхняя полоса круга даёт 265px — ровно две кнопки по 126.
+         Заголовка нет: экран открывается строкой «Диагностика», и так
+         понятно, где мы. -->
+    <div class="top-row">
+      <div class="top-button" onclick="goBack"><text class="top-label">Назад</text></div>
+      <div class="top-button send-button" onclick="send"><text class="top-label">Отчёт</text></div>
     </div>
 
-    <div class="{{runClass}}" onclick="run">
+    <!-- Большая самостоятельная цель во всю ширину. Она же останавливает
+         проверку: отдельная кнопка «Остановить» отнимала ряд, а в ряду на
+         этой высоте помещается только она сама. -->
+    <div class="run-button" onclick="run">
       <text class="run-label">{{runLabel}}</text>
     </div>
 
-    <div class="cancel-button" if="{{showCancel}}" onclick="cancelRun">
-      <text class="cancel-label">Остановить проверку</text>
-    </div>
-
-    <text class="hint" if="{{sentText}}">{{sentText}}</text>
     <text class="progress" if="{{progressText}}">{{progressText}}</text>
 
-    <!-- Статический list-item без for в этой сборке Vela не рендерится,
-         поэтому строки отчёта тоже через for. -->
-    <list class="lines">
-      <list-item for="{{lines}}" class="line" type="line">
+    <!-- Ни list, ни list-item: в этой сборке Vela они не рисуются — ни сами
+         по себе, ни внутри scroll (проверено в эмуляторе на экране ответа).
+         Работает scroll с обычными div, в том числе с for. -->
+    <scroll class="diag-scroll" scroll-y="true">
+      <div class="line" for="{{lines}}">
         <text class="line-text">{{ $item.text }}</text>
-      </list-item>
-    </list>
-
-    <div class="action-row" if="{{hasReport}}">
-      <div class="small-button" onclick="send"><text class="small-label">Отправить отчёт</text></div>
-    </div>
+      </div>
+    </scroll>
   </div>
 </template>
 
@@ -35,6 +33,7 @@ import router from "@system.router"
 import fetch from "@system.fetch"
 import record from "@system.record"
 import request from "@system.request"
+import uploadtask from "@system.uploadtask"
 import prompt from "@system.prompt"
 import audio from "@system.audio"
 import file from "@system.file"
@@ -43,7 +42,7 @@ import { loadSettings, getCached } from "../../common/settings"
 import { networkType } from "../../common/net"
 import { sendDiagnostics, lastVoiceStats } from "../../common/api"
 import { recordAudio, recordingCapability } from "../../common/audio"
-import { mediaVolume, lastPlaybackReport, speakTest } from "../../common/speech"
+import { lastPlaybackReport, lastSpeechReport, speakTest } from "../../common/speech"
 import { CONFIG_STAMP } from "../../common/config"
 import { VERSION_CODE } from "../../common/build-info"
 
@@ -85,20 +84,29 @@ export default {
   add(text, value) {
     // Копия массива, а не push: в этой сборке Vela изменение на месте
     // не всегда перерисовывает список.
-    this.lines = this.lines.concat([{ text: text + ": " + value }])
+    //
+    // На экране живут только последние шесть строк: scroll в этой сборке не
+    // обрезает содержимое, и полный отчёт уезжал под рамку. Хвост и важнее
+    // начала — отказы записи и озвучки приходят последними, — а целиком
+    // отчёт всё равно уходит на шлюз кнопкой «Отчёт».
+    this.lines = this.lines.concat([{ text: text + ": " + value }]).slice(-6)
   },
 
+  // Повторное нажатие по идущей проверке означает «хватит»: отдельной
+  // кнопки для этого на круглом экране нет места.
   run() {
     var self = this
-    if (self.busy) return
+    if (self.busy) {
+      self.cancelRun()
+      return
+    }
     self.busy = true
     self.cancelled = false
     self.showCancel = true
     self.runClass = "run-busy"
-    self.runLabel = "Проверяю…"
+    self.runLabel = "Остановить"
     self.progressText = "готовлю проверку"
     self.lines = []
-    self.sentText = ""
     self.hasReport = false
 
     var report = {
@@ -108,6 +116,7 @@ export default {
       modules: [
         probe("record", record, ["start", "stop"]),
         probe("request", request, ["upload", "download", "onDownloadComplete"]),
+        probe("uploadtask", uploadtask, ["uploadFile"]),
         probe("prompt", prompt, ["show", "showDialog", "showToast"]),
         probe("audio", audio, ["play", "pause", "stop"]),
         probe("file", file, ["readArrayBuffer", "move", "delete", "writeArrayBuffer"]),
@@ -231,7 +240,10 @@ export default {
     speakTest(function(result) {
       if (self.cancelled) return
       report.mediaVolume = result.volume
-      report.speechTest = { ok: true, downloadedMs: result.downloadedMs, totalMs: result.ms, started: result.started }
+      report.speechTest = { ok: true, downloadedMs: result.downloadedMs, totalMs: result.ms, started: result.started,
+        transport: lastSpeechReport().transport, headerShape: lastSpeechReport().headerShape,
+        phase: lastSpeechReport().phase, code: lastSpeechReport().code,
+        attempts: lastSpeechReport().attempts, fallback: lastSpeechReport().fallback }
       report.playback = lastPlaybackReport()
       self.add("громкость", self.volumeText(result.volume))
       self.add("звук", "проиграно за " + result.ms + " мс (загрузка " + result.downloadedMs + " мс)")
@@ -241,7 +253,10 @@ export default {
       report.mediaVolume = error.volume
       report.speechTest = {
         ok: false, message: error.message, code: error.code || null,
-        downloadedMs: error.downloadedMs || null, totalMs: error.ms || null
+        downloadedMs: error.downloadedMs || null, totalMs: error.ms || null,
+        transport: lastSpeechReport().transport, headerShape: lastSpeechReport().headerShape,
+        phase: lastSpeechReport().phase, runtimeCode: lastSpeechReport().code,
+        attempts: lastSpeechReport().attempts, fallback: lastSpeechReport().fallback
       }
       report.playback = lastPlaybackReport()
       self.add("громкость", self.volumeText(error.volume))
@@ -380,37 +395,41 @@ export default {
   // увидеть состояние часов, не пересылая скриншоты.
   send() {
     var self = this
-    if (!self.report) return
-    self.sentText = "отправляю…"
+    // Строка состояния одна на всё: отдельная строка под результат
+    // отправки выталкивала отчёт за нижний край круга.
+    if (!self.report) {
+      self.progressText = "сначала «Проверить всё»"
+      return
+    }
+    self.progressText = "отправляю отчёт…"
     sendDiagnostics(self.report, function(response) {
-      self.sentText = "отчёт отправлен" + (response && response.buildId ? " (шлюз " + String(response.buildId).slice(0, 8) + ")" : "")
+      self.progressText = "отчёт отправлен" + (response && response.buildId ? " (шлюз " + String(response.buildId).slice(0, 8) + ")" : "")
     }, function(error) {
-      self.sentText = "не отправился: " + ((error && error.message) || "ошибка")
+      self.progressText = "не отправился: " + ((error && error.message) || "ошибка")
     })
   }
 }
 </script>
 
 <style>
-.page { flex-direction: column; align-items: center; background-color: #0b1020; padding-left: 36px; padding-right: 36px; padding-top: 16px; padding-bottom: 14px; }
-.topbar { flex-direction: row; justify-content: center; align-items: center; height: 24px; }
-.title { color: #7de3ff; font-size: 16px; font-weight: bold; }
-.back { color: #70d7ef; font-size: 16px; margin-left: 12px; }
+/* Раскладка по кругу: верхний ряд там, где круг даёт 265px, кнопка и
+   отчёт — в середине, где помещаются 370. Страница всегда 480: при
+   меньшей ширине рантайм прижимает содержимое влево, и левый край уходит
+   под рамку. */
+.page { width: 480px; height: 480px; flex-direction: column; align-items: center; justify-content: center; background-color: #0b1020; }
 
-.run-button { width: 230px; height: 60px; border-radius: 30px; background-color: #2b9ec2; justify-content: center; align-items: center; margin-top: 10px; }
-.run-busy { width: 230px; height: 60px; border-radius: 30px; background-color: #1b5f75; justify-content: center; align-items: center; margin-top: 10px; }
-.run-label { color: #07111e; font-size: 19px; font-weight: bold; }
+.top-row { flex-direction: row; justify-content: center; align-items: center; height: 68px; }
+.top-button { width: 126px; height: 68px; border-radius: 22px; background-color: #22314e; justify-content: center; align-items: center; margin-left: 4px; margin-right: 4px; }
+.send-button { background-color: #2c3e5c; }
+.top-label { color: #cfe0f7; font-size: 18px; font-weight: bold; text-align: center; }
 
-.hint { color: #6f80a2; font-size: 13px; margin-top: 6px; text-align: center; width: 100%; lines: 2; text-overflow: ellipsis; }
-.progress { color: #7de3ff; font-size: 15px; margin-top: 6px; text-align: center; width: 100%; lines: 1; text-overflow: ellipsis; }
+.run-button { width: 370px; height: 96px; border-radius: 34px; background-color: #31b2d8; justify-content: center; align-items: center; margin-top: 4px; flex: none; }
+.run-busy { width: 370px; height: 96px; border-radius: 34px; background-color: #9fb3cc; justify-content: center; align-items: center; margin-top: 4px; flex: none; }
+.run-label { color: #07111e; font-size: 25px; font-weight: bold; }
 
-.lines { flex: 1; width: 100%; margin-top: 8px; }
-.line { margin-top: 4px; padding-left: 10px; padding-right: 10px; }
-.line-text { color: #eaf1ff; font-size: 13px; lines: 2; text-overflow: ellipsis; width: 100%; }
+.progress { color: #7de3ff; font-size: 16px; height: 24px; margin-top: 4px; text-align: center; width: 370px; lines: 1; text-overflow: ellipsis; }
 
-.action-row { flex-direction: row; justify-content: center; margin-top: 8px; }
-.small-button { width: 190px; height: 40px; border-radius: 13px; background-color: #202b45; justify-content: center; align-items: center; }
-.small-label { color: #d9e6ff; font-size: 15px; }
-.cancel-button { width: 230px; height: 48px; border-radius: 16px; background-color: #24344f; justify-content: center; align-items: center; margin-top: 8px; }
-.cancel-label { color: #d9e6ff; font-size: 16px; }
+.diag-scroll { width: 370px; height: 180px; margin-top: 4px; flex: none; flex-direction: column; }
+.line { width: 370px; flex-direction: column; margin-top: 4px; padding-left: 12px; padding-right: 12px; }
+.line-text { color: #eaf1ff; font-size: 16px; lines: 2; text-overflow: ellipsis; width: 346px; }
 </style>

@@ -1,8 +1,11 @@
 <template>
   <div class="page">
-    <div class="topbar">
-      <text class="title">ЗАМЕТКИ</text>
-      <text class="back" onclick="goBack">назад</text>
+    <!-- Обе цели наверху — кнопки, а не подписи: по тексту высотой в шрифт
+         пальцем не попасть. Правая кнопка листает список, когда заметок
+         больше, чем помещается, и обновляет его, когда все на экране. -->
+    <div class="top-row">
+      <div class="top-button" onclick="goBack"><text class="top-label">Назад</text></div>
+      <div class="top-button refresh-button" onclick="pageOrRefresh"><text class="top-label">{{pageLabel}}</text></div>
     </div>
 
     <!-- Большая кнопка и здесь: диктовка — главное действие экрана,
@@ -11,22 +14,24 @@
       <text class="dictate-label">{{dictateLabel}}</text>
     </div>
 
-    <text class="hint" if="{{stale}}">список с прошлого раза</text>
-    <text class="hint" if="{{queuedCount}}">не отправлено: {{queuedCount}}</text>
+    <!-- Одна строка состояния вместо четырёх: каждая отдельная строка
+         двигала бы список под рамку. -->
     <text class="error" if="{{errorText}}">{{errorText}}</text>
-    <text class="hint" if="{{emptyNotes}}">Заметок пока нет</text>
+    <text class="hint" if="{{hintText}}">{{hintText}}</text>
 
-    <!-- Статический list-item без for в этой сборке Vela не рендерится,
-         поэтому список только через for. -->
-    <list class="notes-list">
-      <list-item for="{{notes}}" class="note-item" type="note" onclick="openNote($item.id)">
+    <!-- Ни list, ни list-item: в этой сборке Vela они не рисуются вовсе
+         (проверено в эмуляторе на экране ответа). Работает scroll с
+         обычными div, в том числе с for. Показываем ровно две заметки:
+         scroll в этой сборке не обрезает содержимое, и третья залезала бы
+         под рамку, а прокрутку проверить нечем. -->
+    <scroll class="notes-scroll" scroll-y="true">
+      <div class="note-item" for="{{visibleNotes}}" onclick="openNote($item.id)">
         <div class="note-copy">
           <text class="note-text">{{ $item.text }}</text>
           <text class="note-date">{{ $item.createdAt }}</text>
         </div>
-      </list-item>
-    </list>
-    <text class="hint" if="{{hasNotes}}">нажмите, чтобы прочитать</text>
+      </div>
+    </scroll>
   </div>
 </template>
 
@@ -60,9 +65,14 @@ export default {
 
   private: {
     notes: [],
+    // На экран помещаются две заметки; остальные листаются кнопкой.
+    visibleNotes: [],
+    notesPage: 0,
+    pageLabel: "Обновить",
     hasNotes: false,
     emptyNotes: false,
     stale: false,
+    hintText: "",
     errorText: "",
     queuedCount: 0,
     busy: false,
@@ -82,6 +92,7 @@ export default {
         if (cached) self.show(cached, true)
         loadQueue(function() {
           self.queuedCount = getQueued().length
+          self.updateHint()
           if (!getCached().gatewayUrl || !getCached().deviceToken) {
             self.errorText = "Сначала настройте шлюз"
             return
@@ -107,6 +118,48 @@ export default {
     this.hasNotes = this.notes.length > 0
     this.emptyNotes = this.notes.length === 0 && !stale
     this.stale = stale && this.notes.length > 0
+    this.notesPage = 0
+    this.applyPage()
+  },
+
+  // Страница списка и подпись правой кнопки считаются вместе: кнопка либо
+  // листает, либо обновляет, и подпись обязана это показывать.
+  applyPage() {
+    var size = 2
+    var total = this.notes.length
+    var pages = Math.max(1, Math.ceil(total / size))
+    if (this.notesPage >= pages) this.notesPage = 0
+    this.visibleNotes = this.notes.slice(this.notesPage * size, this.notesPage * size + size)
+    this.pageLabel = pages > 1 ? "Ещё · " + (this.notesPage + 1) + "/" + pages : "Обновить"
+    this.updateHint()
+  },
+
+  pageOrRefresh() {
+    if (this.notes.length > 2) {
+      this.notesPage += 1
+      this.applyPage()
+      return
+    }
+    this.refresh()
+  },
+
+  // Одна строка на все состояния списка: что не отправлено, что показано
+  // из кэша, что список пуст, что по заметке можно нажать. Отдельными
+  // строками они выталкивали список за край круга.
+  updateHint() {
+    if (this.queuedCount) {
+      this.hintText = "не отправлено: " + this.queuedCount
+      return
+    }
+    if (this.stale) {
+      this.hintText = "список с прошлого раза"
+      return
+    }
+    if (this.emptyNotes) {
+      this.hintText = "Заметок пока нет"
+      return
+    }
+    this.hintText = this.hasNotes ? "нажмите на заметку, чтобы прочитать" : ""
   },
 
   refresh() {
@@ -217,6 +270,7 @@ export default {
     var self = this
     enqueueAudio(audio.uri, audio.contentType, function() {
       self.queuedCount = getQueued().length
+      self.updateHint()
       self.errorText = "Нет связи — отправлю, когда появится сеть"
     }, function(queueError) {
       // Отложить не удалось — значит запись потеряна, и причина именно в
@@ -295,21 +349,25 @@ export default {
 </script>
 
 <style>
-.page { flex-direction: column; align-items: center; background-color: #0b1020; padding-left: 40px; padding-right: 40px; padding-top: 16px; padding-bottom: 16px; }
-.topbar { flex-direction: row; justify-content: center; align-items: center; height: 24px; }
-.title { color: #7de3ff; font-size: 17px; font-weight: bold; }
-.back { color: #70d7ef; font-size: 16px; margin-left: 12px; }
+/* Раскладка по кругу: верхний ряд стоит там, где круг даёт 265px, а
+   диктовка и список — в середине, где помещаются все 370. Страница всегда
+   480: при меньшей ширине рантайм прижимает содержимое влево. */
+.page { width: 480px; height: 480px; flex-direction: column; align-items: center; justify-content: center; background-color: #0b1020; }
+.top-row { flex-direction: row; justify-content: center; align-items: center; height: 68px; }
+.top-button { width: 126px; height: 68px; border-radius: 22px; background-color: #22314e; justify-content: center; align-items: center; margin-left: 4px; margin-right: 4px; }
+.refresh-button { background-color: #2c3e5c; }
+.top-label { color: #cfe0f7; font-size: 18px; font-weight: bold; text-align: center; }
 
-.dictate-button { width: 240px; height: 68px; border-radius: 34px; background-color: #2b9ec2; justify-content: center; align-items: center; margin-top: 10px; }
-.dictate-busy { width: 240px; height: 68px; border-radius: 34px; background-color: #1b5f75; justify-content: center; align-items: center; margin-top: 10px; }
-.dictate-label { color: #07111e; font-size: 22px; font-weight: bold; }
+.dictate-button { width: 370px; height: 100px; border-radius: 34px; background-color: #31b2d8; justify-content: center; align-items: center; margin-top: 4px; }
+.dictate-busy { width: 370px; height: 100px; border-radius: 34px; background-color: #6f8aa6; justify-content: center; align-items: center; margin-top: 4px; }
+.dictate-label { color: #07111e; font-size: 26px; font-weight: bold; }
 
-.hint { color: #6f80a2; font-size: 14px; margin-top: 6px; text-align: center; width: 100%; lines: 1; text-overflow: ellipsis; }
-.error { color: #ff8f8f; font-size: 14px; margin-top: 6px; text-align: center; width: 100%; lines: 2; text-overflow: ellipsis; }
+.hint { color: #6f80a2; font-size: 15px; height: 24px; margin-top: 4px; text-align: center; width: 340px; lines: 1; text-overflow: ellipsis; }
+.error { color: #ff8f8f; font-size: 15px; height: 24px; margin-top: 4px; text-align: center; width: 340px; lines: 1; text-overflow: ellipsis; }
 
-.notes-list { flex: 1; width: 100%; margin-top: 8px; }
-.note-item { height: 44px; margin-top: 6px; padding-left: 14px; padding-right: 14px; border-radius: 12px; background-color: #141d33; align-items: center; }
-.note-copy { flex-direction: column; width: 100%; }
-.note-text { color: #eaf1ff; font-size: 17px; lines: 1; text-overflow: ellipsis; width: 100%; }
-.note-date { color: #7084a7; font-size: 11px; lines: 1; text-overflow: ellipsis; width: 100%; margin-top: 1px; }
+.notes-scroll { width: 370px; height: 160px; margin-top: 4px; flex: none; flex-direction: column; }
+.note-item { width: 366px; height: 72px; margin-top: 6px; padding-left: 16px; padding-right: 16px; border-radius: 18px; background-color: #141d33; align-items: center; }
+.note-copy { flex-direction: column; width: 330px; }
+.note-text { color: #eaf1ff; font-size: 19px; lines: 1; text-overflow: ellipsis; width: 330px; }
+.note-date { color: #7084a7; font-size: 13px; lines: 1; text-overflow: ellipsis; width: 330px; margin-top: 2px; }
 </style>

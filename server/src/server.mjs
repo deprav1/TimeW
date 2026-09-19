@@ -1570,6 +1570,65 @@ async function synthesizeSpeech(text, requestedFormat = "") {
 // Тип содержимого зависит от провайдера: OpenAI-совместимый отдаёт mp3,
 // Gemini — WAV, собранный нами из сырых сэмплов. Часы скачивают файл и
 // проигрывают его, поэтому заголовок должен быть честным.
+// Часы не могут скачать аудио файлом: request.download на Watch S5 принимает
+// вызов, отдаёт токен задачи и заканчивается кодом 1000 — тринадцать опросов
+// за пятнадцать секунд подряд, то есть это не гонка, а отказ. Зато обычный
+// @system.fetch с текстовым телом работает надёжно, им ходит весь остальной
+// обмен. Поэтому те же ручки умеют отдавать звук строкой base64 внутри JSON.
+//
+// Даром это не даётся: base64 — это +33% объёма, и он целиком лежит в куче
+// JS на часах. Документация @system.file предупреждает про «memory overload
+// and application crashes» прямым текстом, и мы это уже ловили на записи.
+// Поэтому у ручки есть rate: 24 кГц с Gemini прореживаются до 8 кГц —
+// телефонное качество, которого речи достаточно, и втрое меньше байт.
+function decimateWav(wav, targetRate) {
+  if (wav.length < 44 || wav.toString("ascii", 0, 4) !== "RIFF") return wav;
+  const sourceRate = wav.readUInt32LE(24);
+  const channels = wav.readUInt16LE(22);
+  const bits = wav.readUInt16LE(34);
+  if (channels !== 1 || bits !== 16 || !targetRate || targetRate >= sourceRate) return wav;
+  const factor = Math.round(sourceRate / targetRate);
+  if (factor < 2) return wav;
+  const pcm = wav.subarray(44);
+  const samples = Math.floor(pcm.length / 2 / factor);
+  const out = Buffer.alloc(samples * 2);
+  for (let i = 0; i < samples; i++) {
+    // Среднее по группе, а не каждый n-й отсчёт: голое прореживание даёт
+    // слышимый металлический призвук на шипящих.
+    let sum = 0;
+    for (let k = 0; k < factor; k++) sum += pcm.readInt16LE((i * factor + k) * 2);
+    out.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(sum / factor))), i * 2);
+  }
+  return pcmToWav(out, Math.round(sourceRate / factor));
+}
+
+// Максимум, который часам безопасно держать в памяти: 160 КБ звука дают
+// около 213 тысяч символов base64. Всё, что больше, — обрезается по границе
+// сэмпла, и об этом честно сообщается полем truncated.
+const SPEECH_BASE64_LIMIT = 160 * 1024;
+
+function sendAudioAs(req, res, speech) {
+  const params = new URL(req.url, "http://localhost").searchParams;
+  if (params.get("as") !== "base64") return sendAudio(res, speech.audio, speech.contentType);
+  const rate = Number(params.get("rate")) || 0;
+  let audio = rate ? decimateWav(speech.audio, rate) : speech.audio;
+  let truncated = false;
+  if (audio.length > SPEECH_BASE64_LIMIT) {
+    const keep = 44 + Math.floor((SPEECH_BASE64_LIMIT - 44) / 2) * 2;
+    audio = Buffer.concat([audio.subarray(0, 44), audio.subarray(44, keep)]);
+    audio.writeUInt32LE(audio.length - 8, 4);
+    audio.writeUInt32LE(audio.length - 44, 40);
+    truncated = true;
+  }
+  return json(res, 200, {
+    ok: true,
+    contentType: speech.contentType,
+    bytes: audio.length,
+    truncated,
+    audioBase64: audio.toString("base64")
+  });
+}
+
 function sendAudio(res, audioBuffer, contentType) {
   res.writeHead(200, {
     "Content-Type": contentType || "audio/mpeg",
@@ -1615,7 +1674,7 @@ async function handleSpeakById(req, res, id) {
   const providerMs = Date.now() - providerStartedAt;
   const totalMs = Date.now() - startedAt;
   console.log(`tts requestId=${id} provider=${providerMs} bytes=${speech.audio.length} total=${totalMs}`);
-  sendAudio(res, speech.audio, speech.contentType);
+  sendAudioAs(req, res, speech);
 }
 
 async function route(req, res) {
@@ -1743,7 +1802,7 @@ async function route(req, res) {
     const startedAt = Date.now();
     const speech = await synthesizeSpeech(SPEECH_TEST_PHRASE, requestedFormat);
     console.log(`tts requestId=speak-test provider=${Date.now() - startedAt} bytes=${speech.audio.length} total=${Date.now() - startedAt}`);
-    return sendAudio(res, speech.audio, speech.contentType);
+    return sendAudioAs(req, res, speech);
   }
   const speechIdMatch = pathname.match(/^\/api\/v1\/speak\/([^/]+)$/);
   if (req.method === "GET" && speechIdMatch) return handleSpeakById(req, res, decodeURIComponent(speechIdMatch[1]));

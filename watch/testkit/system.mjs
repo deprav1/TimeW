@@ -116,6 +116,10 @@ export const request = {
   // что метода нет. Тесты опираются на это, чтобы фолбэк проверялся всерьёз.
   downloadResult: null,
   completeResult: null,
+  // Сценарий ответов onDownloadComplete по порядку: так тест изображает
+  // прошивку, которая отвечает отказом, пока файл ещё качается.
+  completeScript: [],
+  completeCalls: 0,
   downloadCalls: [],
   throwOnDownload: false,
   throwOnComplete: false,
@@ -129,19 +133,53 @@ export const request = {
       : options.success && options.success(next.result), 0);
   },
   onDownloadComplete(options) {
+    request.completeCalls += 1;
     if (request.throwOnComplete) throw new Error("download completion unavailable");
-    const next = request.completeResult;
-    if (!next) return;
-    setTimeout(() => next.error
-      ? options.fail && options.fail(next.error, next.code)
-      : options.success && options.success(next.result), 0);
+    // Недружелюбная прошивка: пока файл не докачан, вызов отвечает отказом.
+    // Сценарий описывает ровно такое поведение — сколько отказов подряд, а
+    // потом что отдать.
+    const scripted = request.completeScript.length ? request.completeScript.shift() : request.completeResult;
+    if (!scripted) return;
+    setTimeout(() => scripted.error
+      ? options.fail && options.fail(scripted.error, scripted.code)
+      : options.success && options.success(scripted.result), 0);
   },
   reset() {
     request.downloadResult = null;
     request.completeResult = null;
+    request.completeScript = [];
+    request.completeCalls = 0;
     request.downloadCalls = [];
     request.throwOnDownload = false;
     request.throwOnComplete = false;
+  }
+};
+
+// Platform probe only: the production audio path deliberately does not switch
+// to uploadtask until a physical S5 run proves its callbacks and response.
+export const uploadtask = {
+  available: true,
+  calls: [],
+  scripted: [],
+  abortCalls: 0,
+  uploadFile(options) {
+    uploadtask.calls.push(options)
+    if (!uploadtask.available) throw new Error("uploadtask unavailable")
+    const task = {
+      onProgressUpdate() {},
+      offProgressUpdate() {},
+      abort() { uploadtask.abortCalls += 1 }
+    }
+    const step = uploadtask.scripted.shift()
+    if (step && step.response) setTimeout(() => options.success?.(step.response), 0)
+    if (step && step.error) setTimeout(() => options.fail?.(step.error.data || step.error, step.error.code), 0)
+    return task
+  },
+  reset() {
+    uploadtask.available = true
+    uploadtask.calls = []
+    uploadtask.scripted = []
+    uploadtask.abortCalls = 0
   }
 };
 
@@ -241,6 +279,7 @@ export function resetAll() {
   fetchModule.reset();
   file.reset();
   request.reset();
+  uploadtask.reset();
   prompt.reset();
   record.reset();
   audio.reset();

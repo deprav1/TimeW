@@ -1,26 +1,20 @@
 <template>
   <div class="page">
-    <div class="topbar">
-      <text class="brand">НАСТРОЙКИ</text>
-      <text class="back" onclick="goBack">назад</text>
+    <!-- Заголовка нет намеренно: в верхнюю полосу круга (265px) он не
+         помещается рядом с кнопками, а экран и так открывается кнопкой
+         «Настройки». Обе кнопки крупные — мелкие подписи на часах не
+         нажимаются. -->
+    <div class="top-row">
+      <div class="top-button" onclick="goBack"><text class="top-label">Назад</text></div>
+      <div class="top-button check-button" onclick="checkConnection"><text class="top-label">Связь</text></div>
     </div>
 
-    <!-- Четыре карточки в столбик не помещаются в 480px, а прокрутить их
-         нельзя: статический <list-item> в этой сборке Vela не рендерится
-         (проверено в эмуляторе). Поэтому компактные строки: вся строка —
-         кнопка, значение справа. -->
-    <!-- Адрес и токен нельзя ввести на часах: в рантайме Vela нет ни
-         prompt.show, ни элемента input (проверено опросом рантайма).
-         Поэтому они приходят из сборки (npm run setup),
-         а здесь только показываются — чтобы видеть, куда стучится приложение. -->
-    <!-- Тип сети решает вопрос архитектуры: если при выключенном Wi-Fi тут
-         «через телефон» и «Проверить связь» проходит, часам достаточно
-         телефона в кармане и шлюза в сети. -->
-    <div class="row" onclick="refreshNetwork">
-      <text class="row-label">Сеть</text>
-      <text class="row-value">{{networkDisplay}}</text>
-    </div>
-
+    <!-- Ровно четыре строки без прокрутки. Прокрутку проверить нечем —
+         ввод в эмуляторе до рантайма не доходит, — а строка, до которой
+         нельзя доскроллить, ничем не отличается от отсутствующей.
+         Адрес и токен нельзя ввести на часах: в рантайме Vela нет ни
+         prompt.show, ни элемента input (проверено опросом рантайма),
+         они приходят из сборки (npm run setup). -->
     <div class="row" onclick="toggleSpeak">
       <text class="row-label">Озвучка</text>
       <text class="row-value">{{speakDisplay}}</text>
@@ -31,20 +25,24 @@
       <text class="row-value">{{providerDisplay}}</text>
     </div>
 
-    <text class="check-result" if="{{checkResult}}">{{checkResult}}</text>
-    <text class="error-text" if="{{errorText}}">{{errorText}}</text>
+    <!-- «Начать заново» переехало сюда с главного экрана: там оно было
+         мелкой подписью, по которой не попасть пальцем, а нужно редко. -->
+    <div class="row" onclick="resetDialogue">
+      <text class="row-label">Разговор</text>
+      <text class="row-value">начать заново →</text>
+    </div>
 
     <div class="row diag-row" onclick="openDiag">
       <text class="row-label">Диагностика</text>
       <text class="row-value">проверить всё →</text>
     </div>
 
-    <text class="note-line">Сборка {{versionCode}} · параметры сохраняются сразу</text>
-
-    <div class="action-row">
-      <div class="small-button" onclick="checkConnection"><text class="small-label">Проверить связь</text></div>
-      <div class="small-button save-button" onclick="goBack"><text class="small-label">Готово</text></div>
-    </div>
+    <!-- Одна строка на три роли: ошибка, результат проверки и, когда нет
+         ни того ни другого, сеть со сборкой. Тип сети решает вопрос
+         архитектуры: если тут «через телефон» и проверка проходит, часам
+         достаточно телефона в кармане и шлюза в интернете. -->
+    <text class="info-error" if="{{errorText}}">{{errorText}}</text>
+    <text class="info-line" if="{{infoLine}}">{{infoLine}}</text>
   </div>
 </template>
 
@@ -52,6 +50,8 @@
 import router from "@system.router"
 import fetch from "@system.fetch"
 import { loadSettings, saveSettings, applyRemoteRuntime } from "../../common/settings"
+import { resetDialog } from "../../common/api"
+import prompt from "@system.prompt"
 import { networkType } from "../../common/net"
 import { VERSION_CODE } from "../../common/build-info"
 
@@ -119,6 +119,8 @@ export default {
     checkResult: "",
     errorText: "",
     networkDisplay: "…",
+    // Нижняя строка: результат проверки, а пока его нет — сборка и сеть.
+    infoLine: "",
     // Каким путём шла последняя проверка связи — попадает в её результат.
     checkVia: "",
     // Номер сборки: единственный способ понять, что именно стоит на часах.
@@ -127,6 +129,7 @@ export default {
 
   onInit() {
     var self = this
+    self.showInfo("")
     self.refreshNetwork()
     loadSettings(function(settings) {
       self.gatewayUrl = settings.gatewayUrl || ""
@@ -144,6 +147,36 @@ export default {
     self.networkDisplay = "…"
     networkType(function(type) {
       self.networkDisplay = labelForNetwork(type)
+      if (!self.checkResult) self.showInfo("")
+    })
+  },
+
+  // Пустой аргумент означает «показать состояние по умолчанию»: сборку и
+  // сеть. Номер сборки — единственный способ понять, что стоит на часах.
+  showInfo(text) {
+    this.checkResult = text || ""
+    this.infoLine = text || ("Сборка " + this.versionCode + " \u00b7 " + this.networkDisplay)
+  },
+
+  // Разговор копится на шлюзе, и «начать заново» — единственный способ его
+  // оборвать. Подтверждение обязательно: вернуть историю нечем.
+  resetDialogue() {
+    var self = this
+    prompt.showDialog({
+      title: "Начать заново?",
+      message: "История разговора будет очищена",
+      buttons: [{ text: "Очистить" }, { text: "Отмена" }],
+      success: function(data) {
+        if (!data || data.index !== 0) return
+        self.errorText = ""
+        self.showInfo("очищаю…")
+        resetDialog(function() {
+          self.showInfo("разговор очищен")
+        }, function(error) {
+          self.showInfo("")
+          self.errorText = messageFrom(error)
+        })
+      }
     })
   },
 
@@ -173,16 +206,16 @@ export default {
     var self = this
     if (!isValidUrl(self.gatewayUrl)) {
       self.errorText = "Адрес должен начинаться с http:// или https://"
-      self.checkResult = ""
+      self.showInfo("")
       return
     }
     self.errorText = ""
-    self.checkResult = "проверяю…"
+    self.showInfo("проверяю…")
     networkType(function(type) {
       self.networkDisplay = labelForNetwork(type)
       self.checkVia = labelForNetwork(type)
       if (type === "none") {
-        self.checkResult = ""
+        self.showInfo("")
         self.errorText = "На часах нет сети. Включите Wi-Fi или держите телефон рядом"
         return
       }
@@ -196,7 +229,7 @@ export default {
     var timer = setTimeout(function() {
       if (finished) return
       finished = true
-      self.checkResult = ""
+      self.showInfo("")
       self.errorText = "Шлюз не ответил вовремя"
     }, 20000)
     var settle = function(handler) {
@@ -221,14 +254,14 @@ export default {
         }
         var status = statusFrom(response)
         if ((status && status >= 400) || (parsed && parsed.ok === false) || !parsed) {
-          self.checkResult = ""
+          self.showInfo("")
           self.errorText = connectionError(status, parsed)
           return
         }
         var mode = parsed && parsed.mode ? parsed.mode : "unknown"
         if (parsed && parsed.runtime) applyRemoteRuntime(parsed.runtime)
         // Главная строка проверки: видно, каким путём часы дошли до шлюза.
-        self.checkResult = "связь есть (" + self.checkVia + "), режим " + mode
+        self.showInfo("связь есть (" + self.checkVia + "), режим " + mode)
         // Озвучка требует отдельного ключа на шлюзе. Без этой строки
         // включённая «Озвучка» просто молчит, и понять почему нельзя.
         var caps = parsed && parsed.capabilities
@@ -237,7 +270,7 @@ export default {
         }
       }),
       fail: settle(function(error) {
-        self.checkResult = ""
+        self.showInfo("")
         var status = statusFrom(error)
         if (status === 401) {
           self.errorText = "Неверный токен устройства"
@@ -250,7 +283,7 @@ export default {
           : messageFrom(error)
       })
     }) } catch (error) {
-      settle(function() { self.checkResult = ""; self.errorText = messageFrom(error) })()
+      settle(function() { self.showInfo(""); self.errorText = messageFrom(error) })()
     }
   },
 
@@ -267,7 +300,7 @@ export default {
       speakAnswers: self.speakAnswers,
       aiProvider: self.aiProvider
     }, function() {
-      self.checkResult = "сохранено"
+      self.showInfo("сохранено")
     }, function(error) {
       self.errorText = messageFrom(error)
     })
@@ -285,24 +318,24 @@ export default {
 </script>
 
 <style>
-/* Отступы по бокам крупные: на круглом экране у верхней и нижней строки
-   круг сужается примерно до 250px, и при 22px первую строку срезало —
-   видно на фотографии с устройства. */
-.page { flex-direction: column; background-color: #0b1020; padding-left: 38px; padding-right: 38px; padding-top: 18px; padding-bottom: 14px; }
-/* Круглый экран: у верхнего края круг узкий, поэтому панель собрана
-   к центру, а не растянута — иначе заголовок срезало бы углом. */
-.topbar { flex-direction: row; justify-content: center; align-items: center; height: 26px; }
-.brand { color: #7de3ff; font-size: 17px; font-weight: bold; }
-.back { color: #70d7ef; font-size: 16px; margin-left: 12px; padding-left: 6px; padding-right: 6px; }
-.row { flex-direction: row; align-items: center; justify-content: space-between; height: 38px; margin-top: 5px; padding-left: 12px; padding-right: 12px; border-radius: 12px; background-color: #141d33; }
-.row-label { color: #8fa7ca; font-size: 15px; }
-.row-value { color: #eaf1ff; font-size: 15px; margin-left: 10px; flex: 1; lines: 1; text-overflow: ellipsis; text-align: right; }
-.check-result { color: #7de3ff; font-size: 15px; margin-top: 10px; lines: 2; text-overflow: ellipsis; text-align: center; width: 100%; }
-.note-line { color: #5d6c8c; font-size: 13px; margin-top: 6px; lines: 1; text-overflow: ellipsis; text-align: center; width: 100%; }
-.error-text { color: #ff8f8f; font-size: 14px; margin-top: 6px; lines: 3; text-overflow: ellipsis; text-align: center; width: 100%; }
-.action-row { flex-direction: row; margin-top: 10px; justify-content: center; }
-.small-button { width: 170px; height: 40px; margin-left: 5px; margin-right: 5px; border-radius: 13px; background-color: #2b9ec2; justify-content: center; align-items: center; }
-.save-button { width: 92px; background-color: #2b9ec2; }
-.small-label { color: #07111e; font-size: 16px; font-weight: bold; }
+/* Раскладка по кругу: наверху и внизу полоса сужается до 265px, в середине
+   даёт все 480. Поэтому верхний ряд узкий, строки настроек — 340px, и вся
+   колонка держится между y≈45 и y≈435. Страница всегда во весь экран:
+   при меньшей ширине рантайм прижимает содержимое влево, и левый край
+   уходит под рамку. */
+.page { width: 480px; height: 480px; flex-direction: column; align-items: center; justify-content: center; background-color: #0b1020; }
+
+.top-row { flex-direction: row; justify-content: center; align-items: center; height: 68px; }
+.top-button { width: 126px; height: 68px; border-radius: 22px; background-color: #22314e; justify-content: center; align-items: center; margin-left: 4px; margin-right: 4px; }
+.check-button { background-color: #31b2d8; }
+.top-label { color: #cfe0f7; font-size: 18px; font-weight: bold; text-align: center; }
+
+/* Вся строка — цель для пальца: 68px по высоте и 340 по ширине. */
+.row { width: 340px; height: 68px; flex-direction: row; align-items: center; justify-content: space-between; margin-top: 6px; padding-left: 16px; padding-right: 16px; border-radius: 18px; background-color: #141d33; }
+.row-label { color: #8fa7ca; font-size: 18px; }
+.row-value { color: #eaf1ff; font-size: 17px; margin-left: 10px; flex: 1; lines: 1; text-overflow: ellipsis; text-align: right; }
 .diag-row { background-color: #1d3550; }
+
+.info-line { color: #7de3ff; font-size: 15px; height: 24px; margin-top: 6px; lines: 1; text-overflow: ellipsis; text-align: center; width: 280px; }
+.info-error { color: #ff8f8f; font-size: 15px; height: 24px; margin-top: 6px; lines: 1; text-overflow: ellipsis; text-align: center; width: 280px; }
 </style>

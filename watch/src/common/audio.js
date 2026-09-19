@@ -122,8 +122,9 @@ function pcmFramesToWav(frames, sampleRate) {
   return output.buffer
 }
 
-function fileOptions(settings, format) {
+function fileOptions(settings, format, minimal) {
   if (!format) return { duration: settings.maxRecordingMs }
+  if (minimal) return { duration: settings.maxRecordingMs, format: format }
   return {
     duration: settings.maxRecordingMs,
     sampleRate: 16000,
@@ -133,17 +134,25 @@ function fileOptions(settings, format) {
   }
 }
 
-function startFile(settings, done, fail, simplified, reportSeed) {
+function startFile(settings, done, fail, variant, reportSeed) {
+  var simplified = variant === "bare"
+  var minimal = variant === "minimal"
+  variant = variant || "rich"
   var startedAt = Date.now()
   var cancelled = false
   var nextReport = {
-    mode: simplified ? "file-default" : "file-opus",
+    mode: simplified ? "file-default" : (minimal ? "file-opus-minimal" : "file-opus"),
     frameEventAvailable: hasFrameEvents(), frameCount: 0, frameBytes: [],
     signalMetrics: false, stoppedBySilence: false
   }
   if (reportSeed) {
     Object.keys(reportSeed).forEach(function(key) { nextReport[key] = reportSeed[key] })
-    nextReport.mode = reportSeed.mode || nextReport.mode
+    // Preserve the higher-level PCM fallback marker, but let the file retry
+    // report its actual winning variant (rich/minimal/bare).
+    if (!reportSeed.mode || (String(reportSeed.mode).indexOf("fallback") < 0 &&
+        String(reportSeed.mode).indexOf("pcm-") < 0)) {
+      nextReport.mode = simplified ? "file-default" : (minimal ? "file-opus-minimal" : "file-opus")
+    }
   }
   lastReport = nextReport
   var settle = guard(Math.max(RECORD_TIMEOUT_MS, settings.maxRecordingMs + 8000), function() {
@@ -166,14 +175,20 @@ function startFile(settings, done, fail, simplified, reportSeed) {
       if (cancelled) return
       active = null
       var error = errorFrom(data, code, "Не удалось записать голос")
-      if (!simplified && error.code === 202) {
-        startFile(settings, done, fail, true)
-        return
+      if (error.code === 202) {
+        if (variant === "rich") {
+          startFile(settings, done, fail, "minimal", lastReport)
+          return
+        }
+        if (variant === "minimal") {
+          startFile(settings, done, fail, "bare", lastReport)
+          return
+        }
       }
       fail(error)
     })
   }
-  var options = fileOptions(settings, simplified ? "" : "opus")
+  var options = fileOptions(settings, simplified ? "" : "opus", minimal)
   Object.keys(options).forEach(function(key) { request[key] = options[key] })
   active = {
     mode: "file",
@@ -187,7 +202,16 @@ function startFile(settings, done, fail, simplified, reportSeed) {
   try { record.start(request) } catch (error) {
     if (settle.cancel) settle.cancel()
     active = null
-    fail(errorFrom(error, error && error.code, "Не удалось начать запись"))
+    var startError = errorFrom(error, error && error.code, "Не удалось начать запись")
+    if (startError.code === 202 && variant === "rich") {
+      startFile(settings, done, fail, "minimal", lastReport)
+      return
+    }
+    if (startError.code === 202 && variant === "minimal") {
+      startFile(settings, done, fail, "bare", lastReport)
+      return
+    }
+    fail(startError)
   }
 }
 
@@ -235,7 +259,7 @@ function startFramed(settings, done, fail) {
     // Nothing captured and no file handed back: the only remaining option is
     // to record again on the proven Opus path.
     lastReport.mode = "file-opus-fallback"
-    startFile(settings, done, fail, false, lastReport)
+    startFile(settings, done, fail, "rich", lastReport)
   }
 
   var settle = guard(Math.max(RECORD_TIMEOUT_MS, settings.maxRecordingMs + 8000), function() {
@@ -314,7 +338,7 @@ function startFramed(settings, done, fail) {
         try { record.onframerecorded = null } catch (error) {}
         var captureError = errorFrom(data, code, "Автостоп записи недоступен")
         if (captureError.code === 202) {
-          startFile(settings, done, fail, false)
+          startFile(settings, done, fail, "rich")
           return
         }
         fail(captureError)
@@ -324,7 +348,7 @@ function startFramed(settings, done, fail) {
     if (settle.cancel) settle.cancel()
     active = null
     try { record.onframerecorded = null } catch (ignored) {}
-    startFile(settings, done, fail, false)
+    startFile(settings, done, fail, "rich")
   }
 }
 
@@ -362,5 +386,5 @@ export function recordAudio(done, fail) {
     startFramed(settings, done, fail)
     return
   }
-  startFile(settings, done, fail, false)
+  startFile(settings, done, fail, "rich")
 }

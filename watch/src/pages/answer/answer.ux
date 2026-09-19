@@ -1,20 +1,26 @@
 <template>
   <div class="page">
     <div class="topbar">
-      <text class="brand">{{sourceLabel}}</text>
-      <text class="back" onclick="goBack">назад</text>
+      <text class="brand">{{headline}}</text>
     </div>
-    <div class="answer-actions" if="{{canSpeak}}">
-      <div class="action-button" onclick="repeat"><text class="action-label">{{speakLabel}}</text></div>
+    <!-- Ни list, ни list-item: в этой сборке Vela они не рисуются ни сами
+         по себе, ни внутри scroll — экран ответа оставался пустым в
+         эмуляторе. Работает связка scroll + обычные div.
+         Текст режется на страницы, а не прокручивается: прокрутку проверить
+         нечем (ввод в эмуляторе до рантайма не доходит), а scroll в этой
+         сборке не обрезает содержимое — длинный ответ залезал на кнопку.
+         Тап по карточке листает дальше, по кругу. -->
+    <scroll class="answer-scroll" scroll-y="true">
+      <div class="answer-item" onclick="nextPage">
+        <text class="answer-text">{{answerText}}</text>
+      </div>
+    </scroll>
+    <!-- Обе кнопки в один ряд: по отдельности они не помещались в полосу,
+         где круглый экран ещё широкий, и нижняя уходила под рамку. -->
+    <div class="action-row">
+      <div class="action-button" if="{{canSpeak}}" onclick="repeat"><text class="action-label">{{speakLabel}}</text></div>
+      <div class="back-button" onclick="goBack"><text class="back-label">Назад</text></div>
     </div>
-    <!-- В этой версии Vela статический list-item не рендерится. Один
-         элемент тоже передаём через for, как на главном экране. -->
-    <list class="answer-list">
-      <list-item for="{{blocks}}" class="answer-item" type="answer">
-        <text class="answer-text">{{ $item.text }}</text>
-      </list-item>
-    </list>
-    <div class="back-button" onclick="goBack"><text class="back-label">Назад</text></div>
   </div>
 </template>
 
@@ -30,6 +36,26 @@ function labelForSource(source) {
   return String(source).toUpperCase()
 }
 
+// Сколько символов помещается в карточку: 28px в 330px ширины дают около
+// 20 символов в строке, строк влезает шесть. Замерено по скриншоту: при 130
+// шестая строка обрывалась многоточием, то есть часть текста была не
+// прочитана и не пролистана. Режем по словам, чтобы фраза не рвалась.
+var PAGE_LIMIT = 105
+
+function paginate(text) {
+  var rest = String(text || "")
+  var pages = []
+  while (rest.length > PAGE_LIMIT) {
+    var cut = rest.lastIndexOf(" ", PAGE_LIMIT)
+    if (cut < PAGE_LIMIT * 0.6) cut = PAGE_LIMIT
+    pages.push(rest.substring(0, cut))
+    rest = rest.substring(cut)
+    while (rest.charAt(0) === " ") rest = rest.substring(1)
+  }
+  pages.push(rest)
+  return pages
+}
+
 export default {
   protected: {
     text: "",
@@ -39,7 +65,10 @@ export default {
 
   private: {
     sourceLabel: "ОТВЕТ",
-    blocks: [],
+    headline: "ОТВЕТ",
+    answerText: "",
+    pages: [],
+    pageIndex: 0,
     speaking: false,
     canSpeak: false,
     speakLabel: "Слушать"
@@ -47,8 +76,24 @@ export default {
 
   onInit() {
     this.sourceLabel = labelForSource(this.source)
-    this.blocks = [{ text: this.text || "Пустой ответ" }]
+    this.pages = paginate(this.text || "Пустой ответ")
+    this.showPage(0)
     this.canSpeak = !!this.speechId
+  },
+
+  // Заголовок несёт и номер страницы: отдельной строки под него нет, а без
+  // счётчика непонятно, что текст продолжается.
+  showPage(index) {
+    this.pageIndex = index
+    this.answerText = this.pages[index] || ""
+    this.headline = this.pages.length > 1
+      ? this.sourceLabel + " · " + (index + 1) + " из " + this.pages.length + " · тап"
+      : this.sourceLabel
+  },
+
+  nextPage() {
+    if (this.pages.length < 2) return
+    this.showPage((this.pageIndex + 1) % this.pages.length)
   },
 
   goBack() {
@@ -78,17 +123,22 @@ export default {
 </script>
 
 <style>
-.page { flex-direction: column; background-color: #0b1020; padding-left: 16px; padding-right: 16px; padding-top: 12px; padding-bottom: 10px; }
-/* Круглый экран: панель собрана к центру, иначе углы срезают края. */
-.topbar { flex-direction: row; justify-content: center; align-items: center; height: 26px; }
-.brand { color: #7de3ff; font-size: 15px; font-weight: bold; }
-.back { color: #70d7ef; font-size: 13px; margin-left: 12px; padding-left: 6px; padding-right: 6px; }
-.answer-list { flex: 1; width: 100%; margin-top: 10px; }
-.answer-item { padding: 14px; padding-bottom: 34px; border-radius: 18px; background-color: #141d33; }
-.answer-text { color: #eaf1ff; font-size: 28px; line-height: 36px; }
-.answer-actions { flex-direction: row; justify-content: center; margin-top: 10px; }
-.action-button { min-width: 150px; height: 44px; padding-left: 14px; padding-right: 14px; border-radius: 14px; background-color: #202b45; justify-content: center; align-items: center; }
-.action-label { color: #d9e6ff; font-size: 17px; }
-.back-button { width: 210px; height: 52px; border-radius: 18px; background-color: #2b9ec2; justify-content: center; align-items: center; margin-top: 8px; align-self: center; }
-.back-label { color: #07111e; font-size: 18px; font-weight: bold; }
+/* Экран целиком под чтение. Круг на y≈90 даёт 374px, на y≈350 — 426px,
+   поэтому карточка текста 370px занимает всю доступную ширину, а кнопки
+   внизу сужены до 288: на y=430 круг оставляет 293. Страница всегда 480:
+   при меньшей ширине рантайм прижимает содержимое влево, и левый край
+   уходит под рамку. */
+.page { width: 480px; height: 480px; flex-direction: column; align-items: center; justify-content: center; background-color: #0b1020; }
+.topbar { flex-direction: row; justify-content: center; align-items: center; height: 36px; width: 300px; }
+.brand { color: #7de3ff; font-size: 17px; font-weight: bold; width: 300px; lines: 1; text-overflow: ellipsis; text-align: center; }
+.answer-scroll { width: 370px; height: 260px; margin-top: 4px; flex: none; flex-direction: column; }
+/* Карточка — она же кнопка «дальше», поэтому высота фиксирована: иначе
+   короткая страница давала бы маленькую цель. */
+.answer-item { width: 366px; height: 256px; flex-direction: column; padding: 18px; border-radius: 20px; background-color: #141d33; }
+.answer-text { color: #eaf1ff; font-size: 28px; line-height: 36px; lines: 6; text-overflow: ellipsis; width: 330px; }
+.action-row { flex-direction: row; justify-content: center; align-items: center; margin-top: 4px; height: 76px; }
+.action-button { width: 140px; height: 76px; border-radius: 24px; background-color: #9fb3cc; justify-content: center; align-items: center; margin-right: 8px; }
+.action-label { color: #07111e; font-size: 19px; font-weight: bold; }
+.back-button { width: 140px; height: 76px; border-radius: 24px; background-color: #31b2d8; justify-content: center; align-items: center; }
+.back-label { color: #07111e; font-size: 19px; font-weight: bold; }
 </style>

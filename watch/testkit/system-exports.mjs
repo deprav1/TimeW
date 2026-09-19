@@ -5,6 +5,7 @@ export {
   network,
   file,
   request,
+  uploadtask,
   prompt,
   record,
   vibrator,

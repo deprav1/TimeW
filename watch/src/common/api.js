@@ -1,5 +1,6 @@
 import fetch from "@system.fetch"
 import request from "@system.request"
+import uploadtask from "@system.uploadtask"
 import file from "@system.file"
 import { getCached, rememberTransferMode, getRecordingSettings } from "./settings"
 import { guard } from "./guard"
@@ -254,6 +255,49 @@ function uploadByUri(path, uri, contentType, intent, requestKey, preview, record
   })
 }
 
+// Официальный multipart-путь Vela. Он оставлен opt-in до физического зонда:
+// в отличие от request.upload он не был проверен на этой конкретной S5.
+// Если runtime-профиль вручную выберет uploadtask, файл не читается целиком
+// в JS-память, а таймаут/abort возвращают управление как любой другой system-call.
+function uploadByTask(path, uri, contentType, intent, requestKey, preview, recordedMs, done, fail) {
+  if (!uploadtask || typeof uploadtask.uploadFile !== "function") {
+    fail({ message: "uploadtask не поддерживается этой прошивкой" })
+    return
+  }
+  var uploadHeaders = { "Idempotency-Key": requestKey }
+  if (recordedMs) uploadHeaders["X-TimeW-Record-Ms"] = String(Math.round(recordedMs))
+  var token = deviceToken()
+  if (token) uploadHeaders["X-TimeW-Device-Token"] = token
+  var task
+  var settle = guard(uploadTimeout(), function() {
+    if (task && typeof task.abort === "function") {
+      try { task.abort() } catch (error) {}
+    }
+    fail({ message: "Отправка записи не ответила" })
+  })
+  try {
+    task = uploadtask.uploadFile({
+      url: baseUrl() + withProvider(path, intent, preview),
+      filePath: uri,
+      name: "audio",
+      header: uploadHeaders,
+      formData: { filename: filenameFor(contentType), contentType: contentType || "application/octet-stream" },
+      timeout: uploadTimeout(),
+      success: settle(function(response) {
+        handleResponse(response, done, fail)
+      }),
+      fail: settle(function(error, code) {
+        fail({
+          message: (typeof error === "string" ? error : error && error.message) || "Не удалось отправить запись",
+          code: code
+        })
+      })
+    })
+  } catch (error) {
+    settle(function() { fail({ message: "Не удалось начать uploadtask" }) })()
+  }
+}
+
 // Путь B: прочитать файл в память и отправить сырые байты.
 function uploadByBytes(path, uri, contentType, intent, requestKey, preview, recordedMs, done, fail) {
   var settle = guard(requestTimeout(), function() {
@@ -364,6 +408,7 @@ export function voiceBytes(bytes, contentType, intent, done, fail, options) {
 export function voiceUri(uri, contentType, intent, done, fail, options) {
   var senders = {
     upload: uploadByUri,
+    uploadtask: uploadByTask,
     bytes: uploadByBytes
   }
   var requestKey = (options && options.requestKey) || makeRequestKey("voice")
@@ -376,7 +421,10 @@ export function voiceUri(uri, contentType, intent, done, fail, options) {
   // «Отправка файлом не поддерживается» вместо настоящей причины.
   var available = ["bytes"]
   if (request && typeof request.upload === "function") available.push("upload")
-  var preferred = getCached().transferMode === "upload" && available.indexOf("upload") >= 0 ? "upload" : "bytes"
+  var cachedMode = getCached().transferMode
+  if (cachedMode === "uploadtask" && uploadtask && typeof uploadtask.uploadFile === "function") available.push("uploadtask")
+  var preferred = cachedMode === "upload" && available.indexOf("upload") >= 0 ? "upload" :
+    (cachedMode === "uploadtask" && available.indexOf("uploadtask") >= 0 ? "uploadtask" : "bytes")
   var order = [preferred].concat(available.filter(function(mode) { return mode !== preferred }))
 
   function attempt(index, firstError) {
