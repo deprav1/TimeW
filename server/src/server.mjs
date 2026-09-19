@@ -84,7 +84,12 @@ const config = {
   // @system.record по документации не отдаёт файл, когда задан frameSize, —
   // значит весь PCM держится в куче часов, и на 16 кГц это выносило приложение
   // целиком. Включать стоит только на прошивке, где это проверено на месте.
-  autoStopEnabled: ["1", "true", "on"].includes(String(env.AUTO_STOP_ENABLED || "").toLowerCase()),
+  // Автостоп по паузе включён по умолчанию: без него человек договаривает и
+  // ждёт, пока истекут десять секунд, — на часах это главная претензия к
+  // голосовому вводу. Выключается явным AUTO_STOP_ENABLED=0 на случай
+  // прошивки, которая не отдаёт кадры: там часы сами откатятся на файловый
+  // путь, но лишнюю попытку можно и сэкономить.
+  autoStopEnabled: !["0", "false", "off"].includes(String(env.AUTO_STOP_ENABLED || "").toLowerCase()),
   runtimeConfigRevision: env.TIMEW_CONFIG_REVISION || "voice-1",
   ttsFormat: env.TTS_FORMAT || (env.TTS_PROVIDER === "gemini" || (!env.TTS_PROVIDER && env.AI_PROVIDER === "gemini") ? "wav" : "mp3")
 };
@@ -288,6 +293,11 @@ function runtimeSettings() {
     uploadTimeoutMs: boundedNumber(Math.max(config.providerTimeoutMs + 30000, 60000), 30000, 120000, 60000),
     ttsFormat: effectiveTtsFormat(),
     autoStop: Boolean(config.autoStopEnabled),
+    // Как часы забирают озвучку. "bytes" — строкой base64 обычным fetch;
+    // так и только так это работает на Watch S5, где request.download
+    // отвечает кодом 1000. "download" включается переменной окружения для
+    // прошивки, где файловая загрузка жива.
+    speechTransport: env.SPEECH_TRANSPORT === "download" ? "download" : "bytes",
     capabilities: {
       // Frame delivery is probed by the watch; the server cannot infer the
       // installed firmware. Home capabilities, however, are authoritative.
@@ -916,8 +926,51 @@ const SPEECH_PREFIX = "speech:";
 // задерживая ответ. Хранилище живёт в другом регионе, и каждое обращение
 // стоит около 150 мс — на часах это заметно, а ответу эта запись не нужна:
 // озвучку человек запрашивает отдельным запросом секундой позже.
-function registerSpeech(text) {
+// Готовая озвучка последних ответов. Часы просят её отдельным запросом
+// через секунду после ответа, и если к этому моменту синтез уже сделан,
+// ожидание исчезает целиком: у Gemini это три секунды из общей задержки.
+//
+// Кэш живёт в памяти изолята и может не дожить до следующего запроса — это
+// нормально: промах означает ровно прежнее поведение, синтез по запросу.
+// В KV его не положишь: там предел значения 64 КБ, а озвучка крупнее.
+const speechAudioCache = new Map();
+const SPEECH_AUDIO_CACHE_MAX = 4;
+
+function cacheSpeechAudio(id, speech) {
+  speechAudioCache.set(id, speech);
+  while (speechAudioCache.size > SPEECH_AUDIO_CACHE_MAX) {
+    speechAudioCache.delete(speechAudioCache.keys().next().value);
+  }
+}
+
+// Часы сообщают «я буду слушать» параметром запроса: у них озвучка может
+// быть выключена, и тогда синтез — выброшенные деньги и время провайдера.
+function wantsSpeech(url) {
+  try {
+    return url && url.searchParams ? url.searchParams.get("speak") === "1" : false;
+  } catch (error) {
+    return false;
+  }
+}
+
+function prewarmSpeech(id, text) {
+  if (!ttsAvailable() || !text) return;
+  const work = (async () => {
+    const startedAt = Date.now();
+    const speech = await synthesizeSpeech(text, "");
+    cacheSpeechAudio(id, speech);
+    console.log(`tts prewarm id=${id} bytes=${speech.audio.length} ms=${Date.now() - startedAt}`);
+  })();
+  trackBackgroundWrite(work, "prewarmSpeech");
+}
+
+// prewarm включается только тогда, когда часы сказали, что будут слушать
+// (?speak=1). Иначе синтез ушёл бы впустую при выключенной озвучке — и, что
+// важнее для тестов, добавил бы провайдеру лишний вызов, которого никто не
+// просил.
+function registerSpeech(text, prewarm) {
   const id = randomUUID();
+  if (prewarm) prewarmSpeech(id, text);
   const write = (async () => {
     await store.kvSet(SPEECH_PREFIX + id, { text }, config.speechTtlMs);
     if ((await store.kvCount(SPEECH_PREFIX)) > SPEECH_REGISTRY_MAX) {
@@ -1016,7 +1069,7 @@ async function providerChat(text, { provider = config.provider, history = [] } =
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        systemInstruction: { parts: [{ text: "Отвечай по-русски, коротко и понятно для экрана часов. Не используй markdown." }] },
+        systemInstruction: { parts: [{ text: "Отвечай по-русски одним-двумя короткими предложениями: ответ читают на часах и слушают вслух, и каждое лишнее предложение — это лишние секунды синтеза. Без markdown, без вступлений вроде «конечно»." }] },
         contents,
         generationConfig: {
           maxOutputTokens: 256,
@@ -1030,7 +1083,7 @@ async function providerChat(text, { provider = config.provider, history = [] } =
     return { text: normalizeText(data.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("")), source: "gemini" };
   }
   const messages = [
-    { role: "system", content: "Отвечай по-русски, коротко и понятно для экрана часов. Не используй markdown." },
+    { role: "system", content: "Отвечай по-русски одним-двумя короткими предложениями: ответ читают на часах и слушают вслух, и каждое лишнее предложение — это лишние секунды синтеза. Без markdown, без вступлений вроде «конечно»." },
     ...historyToOpenAIMessages(history),
     { role: "user", content: text }
   ];
@@ -1113,10 +1166,10 @@ async function providerVoiceGemini(audioBytes, contentType, history) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      systemInstruction: { parts: [{ text: "Отвечай по-русски, коротко и понятно для экрана часов. Не используй markdown." }] },
+      systemInstruction: { parts: [{ text: "Отвечай по-русски одним-двумя короткими предложениями: ответ читают на часах и слушают вслух, и каждое лишнее предложение — это лишние секунды синтеза. Без markdown, без вступлений вроде «конечно»." }] },
       contents,
       generationConfig: {
-        maxOutputTokens: 512,
+        maxOutputTokens: 220,
         temperature: 0.2,
         thinkingConfig: { thinkingBudget: 0 },
         responseMimeType: "application/json",
@@ -1316,7 +1369,7 @@ async function handleQuery(req, res, reqUrl) {
   const history = await getDialogHistory();
   const result = await providerChat(text, { provider, history });
   trackBackgroundWrite(recordDialogTurn(text, result.text), "recordDialogTurn");
-  const speechId = result.text ? registerSpeech(result.text) : undefined;
+  const speechId = result.text ? registerSpeech(result.text, wantsSpeech(reqUrl)) : undefined;
   const response = { ok: true, kind: "ai", ...result, ...(speechId ? { speechId } : {}) };
   await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
   return json(res, 200, response);
@@ -1407,7 +1460,7 @@ async function handleVoice(req, res, reqUrl) {
       return finish(response);
     }
     trackBackgroundWrite(recordDialogTurn(transcript, answer), "recordDialogTurn");
-    const speechId = answer ? registerSpeech(answer) : undefined;
+    const speechId = answer ? registerSpeech(answer, wantsSpeech(reqUrl)) : undefined;
     const response = { ok: true, transcript, kind: "ai", text: answer, source: "gemini", ...(speechId ? { speechId } : {}) };
     return finish(response);
   }
@@ -1444,7 +1497,7 @@ async function handleVoice(req, res, reqUrl) {
   const history = await getDialogHistory();
   const result = await providerChat(transcript, { provider, history });
   trackBackgroundWrite(recordDialogTurn(transcript, result.text), "recordDialogTurn");
-  const speechId = result.text ? registerSpeech(result.text) : undefined;
+  const speechId = result.text ? registerSpeech(result.text, wantsSpeech(reqUrl)) : undefined;
   const response = { ok: true, transcript, kind: "ai", ...result, ...(speechId ? { speechId } : {}) };
   metrics.providerMs = Date.now() - providerStartedAt;
   return finish(response);
@@ -1665,6 +1718,13 @@ async function handleSpeak(req, res) {
 async function handleSpeakById(req, res, id) {
   const startedAt = Date.now();
   const requestedFormat = new URL(req.url, "http://localhost").searchParams.get("format") || "";
+  // Синтез мог начаться ещё при выдаче ответа. Тогда отдаём готовое и
+  // экономим те самые три секунды, которые часы стоят молча.
+  const ready = speechAudioCache.get(id);
+  if (ready && (!requestedFormat || ready.contentType === (requestedFormat === "wav" ? "audio/wav" : "audio/mpeg"))) {
+    console.log(`tts requestId=${id} cached bytes=${ready.audio.length} total=${Date.now() - startedAt}`);
+    return sendAudioAs(req, res, ready);
+  }
   const text = await takeSpeechText(id);
   if (text === null) {
     return error(res, 404, "Озвучка не найдена или устарела, запросите ответ заново", "not_found");
@@ -1674,6 +1734,8 @@ async function handleSpeakById(req, res, id) {
   const providerMs = Date.now() - providerStartedAt;
   const totalMs = Date.now() - startedAt;
   console.log(`tts requestId=${id} provider=${providerMs} bytes=${speech.audio.length} total=${totalMs}`);
+  // Повторное «Слушать» не должно стоить ещё одного синтеза.
+  cacheSpeechAudio(id, speech);
   sendAudioAs(req, res, speech);
 }
 

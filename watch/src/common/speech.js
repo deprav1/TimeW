@@ -42,7 +42,10 @@ var activeFinish = null
 var lastPlayback = { started: false, error: "", volume: -1 }
 var speechReport = {
   transport: "request.download", headerShape: "string-json", tokenPresent: false,
-  phase: "idle", code: null, attempts: 0, fallback: ""
+  phase: "idle", code: null, attempts: 0, fallback: "",
+  // Куда ушло время внутри озвучки: запрос к шлюзу, разбор base64, запись
+  // файла. Без разбивки «медленно» неотличимо от «медленный провайдер».
+  timings: { fetchMs: 0, decodeMs: 0, writeMs: 0, bytes: 0 }
 }
 
 // Какой транспорт довёз звук в прошлый раз. Молчащий путь стоит целого окна
@@ -94,6 +97,14 @@ function messageForPhase(phase) {
   return ""
 }
 
+function freshReport(transport, headerShape, phase, tokenPresent) {
+  return {
+    transport: transport, headerShape: headerShape, tokenPresent: !!tokenPresent,
+    phase: phase, code: null, attempts: 0, fallback: "",
+    timings: { fetchMs: 0, decodeMs: 0, writeMs: 0, bytes: 0 }
+  }
+}
+
 function speechFailure(code, phase, extra) {
   speechReport.phase = phase
   // Код первой осмысленной причины не затирается более поздним отказом без
@@ -137,6 +148,12 @@ function play(uri, done, fail) {
     audio.onerror = null
     audio.onplay = null
     audio.onloadeddata = null
+    // Освобождаем аудиосессию явно. Естественный конец файла её не отпускает:
+    // после проигранного ответа record.start отвечал кодом 202 — «неверные
+    // параметры», хотя параметры были те же, что и в работавшей записи.
+    // Снаружи это выглядело так: первый ответ слышно, дальше ничего не
+    // работает.
+    try { if (typeof audio.stop === "function") audio.stop() } catch (error) {}
   }
 
   function finishOk() {
@@ -215,7 +232,11 @@ export function lastSpeechReport() {
     transport: speechReport.transport, headerShape: speechReport.headerShape,
     tokenPresent: speechReport.tokenPresent, phase: speechReport.phase,
     code: speechReport.code, attempts: speechReport.attempts,
-    fallback: speechReport.fallback
+    fallback: speechReport.fallback,
+    timings: {
+      fetchMs: speechReport.timings.fetchMs, decodeMs: speechReport.timings.decodeMs,
+      writeMs: speechReport.timings.writeMs, bytes: speechReport.timings.bytes
+    }
   }
 }
 
@@ -306,11 +327,21 @@ function awaitDownloaded(token, onUri, onFail) {
 // Общий путь для озвучки ответа и для проверки динамика: отличаются они
 // только адресом и тем, что делать с готовым файлом.
 function fetchAudio(url, onUri, onFail) {
+  // Файловая загрузка на Watch S5 мертва: два отчёта подряд, тринадцать и
+  // четырнадцать опросов, каждый раз код 1000. Пятнадцать секунд ожидания
+  // перед каждой озвучкой — это и были те 35 секунд, за которые «звук
+  // появился, но медленно». Поэтому по умолчанию сразу текстовый транспорт,
+  // а файловый включается только явным speechTransport:"download" со шлюза —
+  // на случай прошивки, где он работает.
+  if (getRecordingSettings().speechTransport !== "download") {
+    speechReport = freshReport("fetch-base64", "object", "bytes-first", !!getCached().deviceToken)
+    fetchAudioBytes(url, onUri, onFail)
+    return
+  }
   // Путь, отказавший в этой сессии, второй раз не пробуем: он стоит целого
   // окна ожидания, а человек слышит тишину всё это время.
   if (downloadUnusable) {
-    speechReport = { transport: "fetch-base64", headerShape: "object", tokenPresent: !!getCached().deviceToken,
-      phase: "fallback", code: null, attempts: 0, fallback: "" }
+    speechReport = freshReport("fetch-base64", "object", "fallback", !!getCached().deviceToken)
     fetchAudioBytes(url, onUri, onFail)
     return
   }
@@ -320,8 +351,7 @@ function fetchAudio(url, onUri, onFail) {
 function downloadThenBytes(url, onUri, onFail) {
   var epoch = speechEpoch
   var requestHeader = downloadRequest()
-  speechReport = { transport: "request.download", headerShape: "string-json",
-    tokenPresent: requestHeader.tokenPresent, phase: "start", code: null, attempts: 0 }
+  speechReport = freshReport("request.download", "string-json", "start", requestHeader.tokenPresent)
 
   // Любой отказ файловой загрузки — повод попробовать текстовый транспорт,
   // а не сообщать человеку тишину.
@@ -402,7 +432,16 @@ function base64Lookup() {
 function decodeBase64(text) {
   var table = base64Lookup()
   var source = String(text || "")
-  var out = new Uint8Array(Math.floor(source.length * 3 / 4) + 3)
+  // Размер считается заранее, а не подрезается копией в конце: лишний
+  // Uint8Array на 160 КБ — это ещё 160 КБ в куче ровно в тот момент, когда
+  // там уже лежит и строка, и результат. Документация @system.file
+  // предупреждает про «memory overload and application crashes» именно про
+  // такие пики.
+  var padding = 0
+  if (source.charAt(source.length - 1) === "=") padding += 1
+  if (source.charAt(source.length - 2) === "=") padding += 1
+  var bytes = Math.floor(source.length / 4) * 3 - padding
+  var out = new Uint8Array(bytes > 0 ? bytes : 0)
   var written = 0
   var accumulator = 0
   var bits = 0
@@ -414,15 +453,11 @@ function decodeBase64(text) {
     bits += 6
     if (bits >= 8) {
       bits -= 8
-      out[written++] = (accumulator >> bits) & 255
+      if (written < out.length) out[written++] = (accumulator >> bits) & 255
     }
   }
-  var exact = new Uint8Array(written)
-  exact.set(out.subarray(0, written))
-  return exact.buffer
+  return out.buffer
 }
-
-var fallbackCounter = 0
 
 function bytesUrl(url) {
   return url + (url.indexOf("?") >= 0 ? "&" : "?") + "as=base64&rate=" + FALLBACK_RATE
@@ -430,6 +465,7 @@ function bytesUrl(url) {
 
 function fetchAudioBytes(url, onUri, onFail) {
   var epoch = speechEpoch
+  var askedAt = Date.now()
   speechReport.fallback = "start"
   var settle = guard(UPLOAD_TIMEOUT_MS, function() {
     onFail(speechFailure(null, "fallback-timeout"))
@@ -444,6 +480,7 @@ function fetchAudioBytes(url, onUri, onFail) {
       header: headers,
       success: settle(function(response) {
         if (!currentEpoch(epoch)) return
+        speechReport.timings.fetchMs = Date.now() - askedAt
         var body
         try {
           var raw = response && (response.data || response.body || response)
@@ -466,6 +503,8 @@ function fetchAudioBytes(url, onUri, onFail) {
           return
         }
         var buffer
+        var decodeStartedAt = Date.now()
+        speechReport.timings.bytes = body.bytes || 0
         try {
           buffer = decodeBase64(body.audioBase64)
         } catch (decodeError) {
@@ -473,6 +512,10 @@ function fetchAudioBytes(url, onUri, onFail) {
           onFail(speechFailure(null, "fallback-failed"))
           return
         }
+        speechReport.timings.decodeMs = Date.now() - decodeStartedAt
+        // Строка больше не нужна, а весит столько же, сколько сам звук.
+        // Отпускаем её до записи файла, чтобы пик в куче был один, а не два.
+        body.audioBase64 = null
         writeAudioFile(buffer, onUri, onFail)
       }),
       fail: settle(function(error, code) {
@@ -496,8 +539,11 @@ function writeAudioFile(buffer, onUri, onFail) {
     onFail(speechFailure(null, "fallback-failed"))
     return
   }
-  fallbackCounter += 1
-  var uri = "internal://files/timew/speech-" + fallbackCounter + ".wav"
+  // Имя одно на всё приложение: каждая озвучка перезаписывает предыдущую.
+  // Нумерация копила бы файлы на часах до конца памяти — а чистить их
+  // потом было бы нечем и некому.
+  var uri = "internal://files/timew/speech.wav"
+  var writeStartedAt = Date.now()
   var settle = guard(UPLOAD_TIMEOUT_MS, function() {
     speechReport.fallback = "write-timeout"
     onFail(speechFailure(null, "fallback-failed"))
@@ -509,6 +555,7 @@ function writeAudioFile(buffer, onUri, onFail) {
         buffer: buffer,
         success: settle(function() {
           if (!currentEpoch(epoch)) return
+          speechReport.timings.writeMs = Date.now() - writeStartedAt
           speechReport.fallback = "ok"
           speechReport.transport = "fetch-base64"
           onUri(uri)

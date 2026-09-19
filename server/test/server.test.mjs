@@ -156,7 +156,10 @@ test("GET /api/v1/status is protected and reports capabilities without secrets",
     assert.equal(body.capabilities.notes, true);
     assert.equal(body.capabilities.homeConfirmation, false);
     assert.equal(body.capabilities.immediateLight, false);
-    assert.equal(body.runtime.autoStop, false);
+    // Автостоп по паузе включён по умолчанию: без него человек договаривает
+    // и ждёт, пока истекут десять секунд записи.
+    assert.equal(body.runtime.autoStop, true);
+    assert.equal(body.runtime.speechTransport, "bytes");
     assert.ok(body.runtime.revision);
     assert.equal("apiKey" in body, false);
   } finally { config.token = original; }

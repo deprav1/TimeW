@@ -58,7 +58,9 @@ test("текстовый запрос уходит с токеном и ключ
 
   assert.equal(body.text, "ответ");
   const call = lastCall();
-  assert.equal(call.url, `${GATEWAY}/api/v1/query`);
+  // speak=1 означает «я буду слушать ответ»: шлюз по нему начинает синтез
+  // сразу, не дожидаясь отдельного запроса озвучки.
+  assert.equal(call.url, `${GATEWAY}/api/v1/query?speak=1`);
   assert.equal(call.header["X-TimeW-Device-Token"], TOKEN);
   assert.ok(call.header["Idempotency-Key"], "без него обрыв связи создаст дубль заметки");
   assert.equal(JSON.parse(call.data).requestId, call.header["Idempotency-Key"]);

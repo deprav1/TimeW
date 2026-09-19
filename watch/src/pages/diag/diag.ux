@@ -41,7 +41,7 @@ import volume from "@system.volume"
 import { loadSettings, getCached } from "../../common/settings"
 import { networkType } from "../../common/net"
 import { sendDiagnostics, lastVoiceStats } from "../../common/api"
-import { recordAudio, recordingCapability } from "../../common/audio"
+import { recordAudio, recordingCapability, probeFrames } from "../../common/audio"
 import { lastPlaybackReport, lastSpeechReport, speakTest } from "../../common/speech"
 import { CONFIG_STAMP } from "../../common/config"
 import { VERSION_CODE } from "../../common/build-info"
@@ -210,7 +210,9 @@ export default {
     ]
     if (index >= targets.length) {
       report.tls = self.tlsResults
-      self.probeSpeech(report, function() { self.probeRecording(report) })
+      self.probeSpeech(report, function() {
+        self.probeFrameDelivery(report, function() { self.probeRecording(report) })
+      })
       return
     }
     if (index === 0) self.tlsResults = []
@@ -243,10 +245,13 @@ export default {
       report.speechTest = { ok: true, downloadedMs: result.downloadedMs, totalMs: result.ms, started: result.started,
         transport: lastSpeechReport().transport, headerShape: lastSpeechReport().headerShape,
         phase: lastSpeechReport().phase, code: lastSpeechReport().code,
-        attempts: lastSpeechReport().attempts, fallback: lastSpeechReport().fallback }
+        attempts: lastSpeechReport().attempts, fallback: lastSpeechReport().fallback,
+        timings: lastSpeechReport().timings }
       report.playback = lastPlaybackReport()
       self.add("громкость", self.volumeText(result.volume))
-      self.add("звук", "проиграно за " + result.ms + " мс (загрузка " + result.downloadedMs + " мс)")
+      var speechTimings = lastSpeechReport().timings
+      self.add("звук", "проиграно за " + result.ms + " мс: запрос " + speechTimings.fetchMs +
+        ", разбор " + speechTimings.decodeMs + ", запись " + speechTimings.writeMs + " мс")
       next()
     }, function(error) {
       if (self.cancelled) return
@@ -256,7 +261,8 @@ export default {
         downloadedMs: error.downloadedMs || null, totalMs: error.ms || null,
         transport: lastSpeechReport().transport, headerShape: lastSpeechReport().headerShape,
         phase: lastSpeechReport().phase, runtimeCode: lastSpeechReport().code,
-        attempts: lastSpeechReport().attempts, fallback: lastSpeechReport().fallback
+        attempts: lastSpeechReport().attempts, fallback: lastSpeechReport().fallback,
+        timings: lastSpeechReport().timings
       }
       report.playback = lastPlaybackReport()
       self.add("громкость", self.volumeText(error.volume))
@@ -271,12 +277,39 @@ export default {
     return Math.round(value * 100) + "%"
   },
 
+  // Приходят ли кадры PCM — единственный вопрос, от которого зависит, может
+  // ли вопрос отправляться сам, когда человек замолчал. Проверяется отдельно
+  // от записи: там кадры могут не понадобиться вовсе, и отказ спутался бы с
+  // отказом записи.
+  //
+  // Стоит он и вторым делом: зонд идёт сразу после озвучки, то есть ровно в
+  // том порядке, в котором на часах ломался микрофон. Если кадры приходят
+  // здесь — аудиосессия отпускается как надо.
+  probeFrameDelivery(report, next) {
+    var self = this
+    if (self.cancelled) return
+    self.progressText = "проверяю автоотправку"
+    self.add("кадры", "слушаю 2,5 с…")
+    probeFrames(function(result) {
+      if (self.cancelled) return
+      report.frameProbe = result
+      var verdict = result.frames > 0
+        ? result.frames + " кадров, " + result.bytes + " байт — автоотправка возможна"
+        : (result.error || "кадров нет") + (result.code ? " (код " + result.code + ")" : "")
+      self.add("кадры", verdict)
+      next()
+    })
+  },
+
   probeRecording(report) {
     var self = this
     if (self.cancelled) return
     self.progressText = "проверяю запись"
     self.add("запись", "пробую…")
+    var recordStartedAt = Date.now()
     recordAudio(function(audio) {
+      report.recordMs = Date.now() - recordStartedAt
+      report.recordedMs = audio.recordedMs || null
       if (self.cancelled) return
       if (audio.bytes) {
         var framed = new Uint8Array(audio.bytes)

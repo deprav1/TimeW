@@ -27,7 +27,10 @@ var DEFAULTS = {
     requestTimeoutMs: 30000,
     uploadTimeoutMs: 60000,
     ttsFormat: "wav",
-    autoStop: false
+    autoStop: false,
+    // По умолчанию звук едет текстом: файловая загрузка на Watch S5
+    // отказывает кодом 1000, и попытка стоит пятнадцати секунд тишины.
+    speechTransport: "bytes"
   }
 }
 
@@ -211,6 +214,7 @@ export function applyRemoteRuntime(runtime, done) {
   // Автостоп включается только явным true со шлюза: по умолчанию часы идут
   // проверенным файловым путём Opus, который не держит запись в куче JS.
   current.autoStop = runtime.autoStop === true
+  current.speechTransport = runtime.speechTransport === "download" ? "download" : "bytes"
   cached.runtimeConfig = current
   cached.runtimeRevision = runtime.revision ? String(runtime.revision) : cached.runtimeRevision
   // One write instead of one write per field keeps the cold-start refresh

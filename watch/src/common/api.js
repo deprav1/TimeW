@@ -173,7 +173,7 @@ export function query(text, done, fail, requestKey) {
   var provider = getCached().aiProvider
   if (provider && provider !== "auto") payload.provider = provider
   callFetch({
-    url: baseUrl() + "/api/v1/query",
+    url: baseUrl() + "/api/v1/query" + (getCached().speakAnswers ? "?speak=1" : ""),
     method: "POST",
     header: headers({ "Idempotency-Key": stableKey }),
     data: JSON.stringify(payload)
@@ -219,6 +219,10 @@ function withProvider(path, intent, preview) {
   if (provider && provider !== "auto") params.push("provider=" + provider)
   if (intent) params.push("intent=" + intent)
   if (intent === "note" && preview) params.push("preview=1")
+  // «Я буду слушать»: шлюз начнёт синтез вместе с ответом, и к моменту, когда
+  // часы попросят озвучку, она уже готова. Это те самые три секунды тишины
+  // между ответом на экране и голосом.
+  if (getCached().speakAnswers) params.push("speak=1")
   return params.length ? path + "?" + params.join("&") : path
 }
 

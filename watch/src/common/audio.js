@@ -1,4 +1,5 @@
 import record from "@system.record"
+import { stopSpeaking } from "./speech"
 import { RECORD_TIMEOUT_MS } from "./config"
 import { getRecordingSettings } from "./settings"
 import { guard } from "./guard"
@@ -367,6 +368,81 @@ export function cancelRecording() {
   try { record.stop() } catch (error) {}
 }
 
+// Зонд кадров для диагностики: отвечает на единственный вопрос — приходят ли
+// на этой прошивке кадры PCM вообще. От него зависит, может ли вопрос
+// отправляться сам, когда человек замолчал: без кадров сигнал тишины взять
+// неоткуда, и запись идёт фиксированной длины.
+//
+// Это не запись: результат никуда не отправляется, файл не создаётся,
+// длительность фиксированная и короткая.
+var PROBE_MS = 2500
+
+export function probeFrames(done) {
+  var result = {
+    slotDeclared: hasFrameEvents(), frames: 0, bytes: 0, firstFrameMs: 0,
+    ms: 0, error: "", code: null, gotUri: false
+  }
+  var startedAt = Date.now()
+  var finished = false
+  stopSpeaking()
+
+  function finish() {
+    if (finished) return
+    finished = true
+    if (settle.cancel) settle.cancel()
+    result.ms = Date.now() - startedAt
+    try { record.onframerecorded = null } catch (error) {}
+    try { record.stop() } catch (error) {}
+    active = null
+    done(result)
+  }
+
+  var settle = guard(PROBE_MS + 4000, finish)
+
+  if (!result.slotDeclared) {
+    result.error = "рантайм не объявляет onframerecorded"
+    finish()
+    return
+  }
+
+  setTimeout(function() {
+    try {
+      record.onframerecorded = function(event) {
+        if (finished || !event || !event.frameBuffer) return
+        var frame = event.frameBuffer
+        var length = frame.byteLength || frame.length || 0
+        if (!result.frames) result.firstFrameMs = Date.now() - startedAt
+        result.frames += 1
+        result.bytes += length
+      }
+      active = { mode: "probe", cancel: finish }
+      record.start({
+        duration: PROBE_MS,
+        sampleRate: FRAME_SAMPLE_RATE,
+        numberOfChannels: 1,
+        encodeBitRate: 128000,
+        frameSize: getRecordingSettings().frameSize,
+        format: "pcm",
+        success: function(data) {
+          result.gotUri = !!uriFrom(data)
+          settle(finish)()
+        },
+        complete: settle(finish),
+        fail: function(data, code) {
+          result.code = typeof code === "number" ? code : null
+          result.error = (messageForCode(code) || (data && data.message) || "отказ записи")
+          settle(finish)()
+        }
+      })
+      // Останавливаем сами: duration рантайм может и не соблюсти.
+      setTimeout(function() { if (!finished) { try { record.stop() } catch (error) {} } }, PROBE_MS)
+    } catch (error) {
+      result.error = "record.start бросил исключение"
+      finish()
+    }
+  }, AUDIO_RELEASE_MS)
+}
+
 export function recordingCapability() {
   return {
     frameEventAvailable: hasFrameEvents(),
@@ -380,11 +456,37 @@ export function resetFrameSupport() {
   framedUnsupported = false
 }
 
+// Пауза между «замолчи» и «слушай». Рантайм отпускает аудиосессию не
+// мгновенно, а record.start в занятую сессию отвечает кодом 202 — тем же,
+// которым он отвечает на неверные параметры, так что по коду эти случаи не
+// различить. Четверть секунды дешевле, чем несостоявшаяся запись.
+var AUDIO_RELEASE_MS = 250
+
 export function recordAudio(done, fail) {
   var settings = getRecordingSettings()
-  if (settings.autoStop && !framedUnsupported && hasFrameEvents()) {
-    startFramed(settings, done, fail)
-    return
+  // Микрофон и динамик на этой прошивке не уживаются: после проигранного
+  // ответа запись отказывала кодом 202, и выглядело это как «первый ответ
+  // услышал, дальше ничего не работает».
+  stopSpeaking()
+  var cancelled = false
+  var timer = setTimeout(function() {
+    if (cancelled) return
+    active = null
+    if (settings.autoStop && !framedUnsupported && hasFrameEvents()) {
+      startFramed(settings, done, fail)
+      return
+    }
+    startFile(settings, done, fail, "rich")
+  }, AUDIO_RELEASE_MS)
+  // Пауза перед стартом — тоже часть записи, и отменить её должно быть можно.
+  // Иначе отменённая запись всё равно включала бы микрофон через четверть
+  // секунды, уже никому не нужная.
+  active = {
+    mode: "pending",
+    cancel: function() {
+      cancelled = true
+      clearTimeout(timer)
+      active = null
+    }
   }
-  startFile(settings, done, fail, "rich")
 }

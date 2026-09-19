@@ -34,6 +34,13 @@ function resetSpeech() {
   resetSpeechTransport();
 }
 
+// Файловый транспорт со шлюза: по умолчанию часы ходят текстом, потому что
+// request.download на Watch S5 отвечает кодом 1000. Тесты самого файлового
+// пути включают его явно — как это сделал бы шлюз для другой прошивки.
+async function useDownloadTransport() {
+  await new Promise((resolve) => applyRemoteRuntime({ speechTransport: "download" }, resolve));
+}
+
 // Ответ шлюза на запрос звука текстом: тот же wav, только base64.
 function base64Audio(bytes) {
   const buffer = Buffer.from(bytes);
@@ -148,6 +155,22 @@ test("прошивка без кадров отвечает сразу и одн
   assert.equal(result.capture.mode, "pcm-no-frames-file");
 });
 
+// Пауза перед стартом микрофона отменяется вместе с записью: иначе отказ
+// или уход с экрана всё равно включал бы микрофон через четверть секунды.
+test("отменённая запись не включает микрофон после паузы", async () => {
+  resetAll();
+  resetFrameSupport();
+  record.scripted = { result: { uri: "internal://cache/rec-cancel.opus" } };
+  let starts = 0;
+  const originalStart = record.start;
+  record.start = (options) => { starts += 1; return originalStart.call(record, options) };
+  recordAudio(() => {}, () => {});
+  cancelRecording();
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  record.start = originalStart;
+  assert.equal(starts, 0, "микрофон не должен включаться после отмены");
+});
+
 test("после записи без кадров потоковый режим больше не пробуется", async () => {
   resetAll();
   resetFrameSupport();
@@ -215,6 +238,7 @@ test("нулевая громкость объясняется словами и
 
 test("отсутствие модуля громкости не блокирует озвучку", async () => {
   resetAll();
+  await useDownloadTransport();
   volume.available = false;
   const value = await new Promise((resolve) => mediaVolume(resolve));
   assert.equal(value, -1);
@@ -229,6 +253,7 @@ test("отсутствие модуля громкости не блокируе
 
 test("начало воспроизведения фиксируется для диагностики", async () => {
   resetAll();
+  await useDownloadTransport();
   resetSpeech();
   request.downloadResult = { result: { token: "download-report" } };
   request.completeResult = { result: { uri: "internal://files/reply.wav" } };
@@ -246,6 +271,7 @@ test("начало воспроизведения фиксируется для 
 // поэтому ничего не доказывает: спрашивать надо повторно.
 test("озвучка дожидается файла, пока рантайм отвечает «ещё не готово»", async () => {
   resetAll();
+  await useDownloadTransport();
   resetSpeech();
   request.downloadResult = { result: { token: "download-slow" } };
   request.completeScript = [
@@ -270,6 +296,7 @@ test("озвучка дожидается файла, пока рантайм о
 // приехать вторым способом — текстом через @system.fetch.
 test("глухая файловая загрузка уводит озвучку на текстовый транспорт", async () => {
   resetAll();
+  await useDownloadTransport();
   resetSpeech();
   request.downloadResult = { result: { token: "download-dead" } };
   request.completeResult = { error: { message: "gone" }, code: 1001 };
@@ -293,6 +320,7 @@ test("глухая файловая загрузка уводит озвучку
 // тишину, и экран не остаётся в состоянии «говорю».
 test("если и текстовый транспорт не смог, озвучка честно отказывает", async () => {
   resetAll();
+  await useDownloadTransport();
   resetSpeech();
   request.downloadResult = { result: { token: "download-dead" } };
   request.completeResult = { error: { message: "gone" }, code: 1001 };
@@ -305,6 +333,7 @@ test("если и текстовый транспорт не смог, озву�
 
 test("синхронный отказ загрузки озвучки уводит на запасной путь", async () => {
   resetAll();
+  await useDownloadTransport();
   resetSpeech();
   request.throwOnDownload = true;
   fetchModule.scripted = [base64Audio([82, 73, 70, 70, 9, 9])];
@@ -316,6 +345,7 @@ test("синхронный отказ загрузки озвучки уводи
 
 test("синхронный отказ завершения загрузки тоже уводит на запасной путь", async () => {
   resetAll();
+  await useDownloadTransport();
   resetSpeech();
   request.downloadResult = { result: { token: "download-1" } };
   request.throwOnComplete = true;
@@ -328,6 +358,7 @@ test("синхронный отказ завершения загрузки то
 
 test("озвучка остаётся активной до ended и затем завершает UI-состояние", async () => {
   resetAll();
+  await useDownloadTransport();
   request.downloadResult = { result: { token: "download-1" } };
   request.completeResult = { result: { uri: "internal://files/reply.wav" } };
   let finished = false;
@@ -340,6 +371,7 @@ test("озвучка остаётся активной до ended и затем 
 
 test("остановка озвучки завершает активное UI-состояние", async () => {
   resetAll();
+  await useDownloadTransport();
   request.downloadResult = { result: { token: "download-1" } };
   request.completeResult = { result: { uri: "internal://files/reply.wav" } };
   let finished = false;
@@ -351,7 +383,9 @@ test("остановка озвучки завершает активное UI-�
 
 test("озвучка читает формат шлюза как hint запроса", async () => {
   resetAll();
-  await new Promise((resolve) => applyRemoteRuntime({ ttsFormat: "mp3" }, resolve));
+  // Одним вызовом: applyRemoteRuntime применяет весь набор разом, и второй
+  // вызов с одним полем сбросил бы транспорт обратно на текстовый.
+  await new Promise((resolve) => applyRemoteRuntime({ ttsFormat: "mp3", speechTransport: "download" }, resolve));
   request.downloadResult = { result: { token: "download-format" } };
   request.completeResult = { result: { uri: "internal://files/reply.mp3" } };
   resetSpeech();
@@ -363,6 +397,7 @@ test("озвучка читает формат шлюза как hint запро
 
 test("request.download получает строковый header и сохраняет безопасный probe-отчёт", async () => {
   resetAll();
+  await useDownloadTransport();
   request.downloadResult = { result: { token: "download-header" } };
   request.completeResult = { result: { uri: "internal://files/reply.wav" } };
   speak("speech-header", () => {}, (error) => speechErrors.push(error.message));
@@ -378,6 +413,7 @@ test("request.download получает строковый header и сохра�
 // же сообщается судьба последней попытки, а не первой.
 test("код отказа файловой загрузки остаётся в отчёте после ухода на запасной путь", async () => {
   resetAll();
+  await useDownloadTransport();
   resetSpeech();
   request.downloadResult = { error: { message: "runtime rejected" }, code: 202 };
   fetchModule.scripted = [base64Audio([82, 73, 70, 70, 5, 5])];

@@ -51,11 +51,22 @@ Access-Control-Max-Age: 86400
 эффективный режим и флаги возможностей без ключей и других секретов:
 
 ```json
-{"ok":true,"service":"timew-gateway","mode":"demo","provider":"mock","buildId":"local","configRevision":"voice-1","runtime":{"revision":"voice-1","maxRecordingMs":10000,"silenceThreshold":450,"silenceDurationMs":1000,"speechGraceMs":900,"frameSize":2048,"requestTimeoutMs":35000,"uploadTimeoutMs":60000,"ttsFormat":"mp3","autoStop":false,"capabilities":{"frameRecording":"probe","immediateLight":false,"undoLight":false}},"capabilities":{"ai":false,"notes":true,"speech":false,"home":false,"homeConfirmation":false,"immediateLight":false,"undoLight":false,"autoStop":false}}
+{"ok":true,"service":"timew-gateway","mode":"demo","provider":"mock","buildId":"local","configRevision":"voice-1","runtime":{"revision":"voice-1","maxRecordingMs":10000,"silenceThreshold":450,"silenceDurationMs":1000,"speechGraceMs":900,"frameSize":2048,"requestTimeoutMs":35000,"uploadTimeoutMs":60000,"ttsFormat":"mp3","autoStop":true,"speechTransport":"bytes","capabilities":{"frameRecording":"probe","immediateLight":false,"undoLight":false}},"capabilities":{"ai":false,"notes":true,"speech":false,"home":false,"homeConfirmation":false,"immediateLight":false,"undoLight":false,"autoStop":true}}
 ```
 
+`runtime.speechTransport` — каким способом часам забирать озвучку.
+**По умолчанию `"bytes"`**: звук приезжает строкой base64 внутри JSON
+(`GET /api/v1/speak/...?as=base64&rate=8000`) обычным `@system.fetch`. На
+Xiaomi Watch S5 это единственный работающий путь — `request.download`
+принимает вызов и заканчивается кодом 1000, сколько его ни опрашивай
+(проверено дважды: тринадцать и четырнадцать опросов за пятнадцать секунд).
+Значение `"download"` включается переменной `SPEECH_TRANSPORT=download` и
+возвращает файловую загрузку для прошивок, где она жива.
+
 `runtime.autoStop` — разрешение часам использовать потоковый режим записи с
-автостопом по паузе. **По умолчанию `false`**: в этом режиме `@system.record`
+автостопом по паузе, то есть отправку вопроса сразу, как человек замолчал.
+**По умолчанию `true`**, выключается явным `AUTO_STOP_ENABLED=0`. Цена
+известна: в этом режиме `@system.record`
 не отдаёт файл (документированное поведение при заданном `frameSize`), поэтому
 вся запись держится в памяти часов. Включается явным `AUTO_STOP_ENABLED=1` и
 только на прошивке, где это проверено на устройстве. Часы трактуют любое
