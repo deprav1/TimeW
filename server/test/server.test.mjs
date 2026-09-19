@@ -194,6 +194,28 @@ test("an immediate light action returns a one-shot undo receipt", async () => {
   });
 });
 
+test("parallel retries of one light request execute Tuya only once", async () => {
+  let commandCalls = 0;
+  await withMockTuya(async (req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    if (req.method === "GET" && url.pathname === "/v1.0/token") return tokenHandler("tok-parallel")(res);
+    if (req.method === "POST" && url.pathname.includes("/commands")) {
+      commandCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ success: true, result: true }));
+  }, async () => {
+    await writeFile(devicesJsonPath, JSON.stringify({ bedroom: ["dev-parallel"] }), "utf8");
+    const init = { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": "parallel-light" }, body: JSON.stringify({ text: "включи свет в спальне", requestId: "parallel-light" }) };
+    const responses = await Promise.all([fetch(`${base}/api/v1/query`, init), fetch(`${base}/api/v1/query`, init)]);
+    assert.deepEqual(responses.map((response) => response.status), [200, 200]);
+    const bodies = await Promise.all(responses.map((response) => response.json()));
+    assert.equal(bodies[0].undoToken, bodies[1].undoToken);
+    assert.equal(commandCalls, 1);
+  });
+});
+
 test("POST /api/v1/query with a note creates a note visible via GET /api/v1/notes", async () => {
   const res = await fetch(`${base}/api/v1/query`, {
     method: "POST",
@@ -955,6 +977,39 @@ test("a Tuya API-level error (e.g. device offline) surfaces as a clear 502, not 
       assert.match(body.error.message, /device offline/);
     }
   );
+});
+
+test("a partial multi-light failure is compensated before returning an error", async () => {
+  const commands = [];
+  await withMockTuya(async (req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    if (req.method === "GET" && url.pathname === "/v1.0/token") return tokenHandler("tok-rollback")(res);
+    if (req.method === "POST" && url.pathname.includes("/commands")) {
+      const device = url.pathname.split("/").at(-2);
+      const body = await readJsonBody(req);
+      commands.push({ device, value: body.commands?.[0]?.value });
+      if (device === "dev-fail" && commands.filter((item) => item.device === device).length === 1) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ success: false, code: 2007, msg: "device offline" }));
+      }
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ success: true, result: true }));
+  }, async () => {
+    await writeFile(devicesJsonPath, JSON.stringify({ bedroom: ["dev-ok", "dev-fail"] }), "utf8");
+    const res = await fetch(`${base}/api/v1/query`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "включи свет в спальне" })
+    });
+    assert.equal(res.status, 502);
+    const body = await res.json();
+    assert.match(body.error.message, /откат/);
+    assert.deepEqual(commands, [
+      { device: "dev-ok", value: true },
+      { device: "dev-fail", value: true },
+      { device: "dev-ok", value: false }
+    ]);
+  });
 });
 
 test("loadDeviceMap returns null when devices.json is absent (no crash)", async () => {
