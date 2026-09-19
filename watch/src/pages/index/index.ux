@@ -24,7 +24,7 @@
     </div>
 
     <div class="quick-row" if="{{showQuick}}">
-      <div class="quick-button home-button" onclick="startHome"><text class="quick-label">Дом</text></div>
+      <div class="quick-button home-button" onclick="startHome"><text class="quick-label">{{homeLabel}}</text></div>
       <div class="quick-button note-button" onclick="startNote"><text class="quick-label">Заметка</text></div>
     </div>
     <div class="quick-row" if="{{undoToken}}">
@@ -79,7 +79,9 @@ export default {
     undoToken: "",
     undoTimer: 0,
     showQuick: true,
-    showCancel: false
+    showCancel: false,
+    homeAvailable: true,
+    homeLabel: "Дом"
   },
 
   onShow() {
@@ -95,6 +97,10 @@ export default {
       // known-good values and conservative local defaults remain usable.
       fetchStatus(function(response) {
         if (response && response.runtime) applyRemoteRuntime(response.runtime)
+        if (response && response.capabilities) {
+          self.homeAvailable = response.capabilities.home === true
+          self.homeLabel = self.homeAvailable ? "Дом" : "Дом · нет"
+        }
       }, function() {})
       var now = Date.now()
       if (self.lastSyncAt && now - self.lastSyncAt < 30000) return
@@ -296,6 +302,10 @@ export default {
 
   startHome() {
     if (this.busy) return
+    if (!this.homeAvailable) {
+      this.errorText = "Дом не настроен на шлюзе"
+      return
+    }
     this.startVoice("home")
   },
 
