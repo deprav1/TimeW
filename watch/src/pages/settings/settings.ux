@@ -301,8 +301,8 @@ export default {
 .note-line { color: #5d6c8c; font-size: 13px; margin-top: 6px; lines: 1; text-overflow: ellipsis; text-align: center; width: 100%; }
 .error-text { color: #ff8f8f; font-size: 14px; margin-top: 6px; lines: 3; text-overflow: ellipsis; text-align: center; width: 100%; }
 .action-row { flex-direction: row; margin-top: 10px; justify-content: center; }
-.small-button { width: 130px; height: 40px; margin-left: 5px; margin-right: 5px; border-radius: 13px; background-color: #2b9ec2; justify-content: center; align-items: center; }
-.save-button { background-color: #2b9ec2; }
+.small-button { width: 170px; height: 40px; margin-left: 5px; margin-right: 5px; border-radius: 13px; background-color: #2b9ec2; justify-content: center; align-items: center; }
+.save-button { width: 92px; background-color: #2b9ec2; }
 .small-label { color: #07111e; font-size: 16px; font-weight: bold; }
 .diag-row { background-color: #1d3550; }
 </style>
