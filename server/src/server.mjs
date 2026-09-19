@@ -961,12 +961,17 @@ function wantsSpeech(url) {
 
 function prewarmSpeech(id, text) {
   if (!ttsAvailable() || !text) return;
-  const work = (async () => {
-    const startedAt = Date.now();
-    const speech = await synthesizeSpeech(text, "");
+  const startedAt = Date.now();
+  const work = synthesizeSpeech(text, "").then((speech) => {
     cacheSpeechAudio(id, speech);
     console.log(`tts prewarm id=${id} bytes=${speech.audio.length} ms=${Date.now() - startedAt}`);
-  })();
+    return speech;
+  });
+  // В кэш кладётся само обещание, а не только результат. Иначе запрос часов,
+  // пришедший через секунду после ответа, видел пустой кэш и запускал
+  // второй синтез параллельно первому: измерено 6,3 с вместо 3,2 с — хуже,
+  // чем совсем без предварительного синтеза.
+  speechAudioCache.set(id, work);
   trackBackgroundWrite(work, "prewarmSpeech");
 }
 
@@ -1724,12 +1729,16 @@ async function handleSpeak(req, res) {
 async function handleSpeakById(req, res, id) {
   const startedAt = Date.now();
   const requestedFormat = new URL(req.url, "http://localhost").searchParams.get("format") || "";
-  // Синтез мог начаться ещё при выдаче ответа. Тогда отдаём готовое и
-  // экономим те самые три секунды, которые часы стоят молча.
-  const ready = speechAudioCache.get(id);
-  if (ready && (!requestedFormat || ready.contentType === (requestedFormat === "wav" ? "audio/wav" : "audio/mpeg"))) {
-    console.log(`tts requestId=${id} cached bytes=${ready.audio.length} total=${Date.now() - startedAt}`);
-    return sendAudioAs(req, res, ready);
+  // Синтез мог начаться ещё при выдаче ответа — либо уже закончиться, либо
+  // идти прямо сейчас. Во втором случае ждём его, а не запускаем второй.
+  const pending = speechAudioCache.get(id);
+  if (pending) {
+    const ready = await Promise.resolve(pending).catch(() => null);
+    const wanted = requestedFormat === "mp3" ? "audio/mpeg" : requestedFormat === "wav" ? "audio/wav" : "";
+    if (ready && (!wanted || ready.contentType === wanted)) {
+      console.log(`tts requestId=${id} prewarmed bytes=${ready.audio.length} total=${Date.now() - startedAt}`);
+      return sendAudioAs(req, res, ready);
+    }
   }
   const text = await takeSpeechText(id);
   if (text === null) {
