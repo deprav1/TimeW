@@ -44,6 +44,20 @@ function hasFrameEvents() {
 // storage-schema blast radius, and relearning costs one capture per launch.
 var framedUnsupported = false
 
+// Документация @system.record: «When this parameter [frameSize] is set, the
+// success callback will not return a uri». Значит в потоковом режиме кадры и
+// есть запись — файла, который можно было бы отдать наверх, не существует, и
+// весь PCM лежит в куче JS. Документация @system.file про то же предупреждает
+// прямым текстом: на устройствах с малой памятью это «memory overload and
+// application crashes».
+//
+// Отсюда две границы. 8 кГц — собственное значение модуля по умолчанию, вдвое
+// дешевле 16 кГц и достаточно для распознавания речи (телефонное качество).
+// Потолок по байтам не даёт куче расти бесконечно: при 8 кГц/16 бит это около
+// шести секунд, дальше запись закрывается тем, что уже набрано.
+var FRAME_SAMPLE_RATE = 8000
+var MAX_FRAME_BYTES = 96 * 1024
+
 function uriFrom(data) {
   var uri = data && (data.uri || data.path || data)
   return typeof uri === "string" && uri ? uri : ""
@@ -102,6 +116,9 @@ function pcmFramesToWav(frames, sampleRate) {
   view.setUint32(40, length, true)
   var offset = 44
   frames.forEach(function(frame) { output.set(frame, offset); offset += frame.length })
+  // Кадры больше не нужны, а следом идёт base64 на всю длину. Отпускаем ссылки
+  // здесь, чтобы сборщик мог забрать их до пиковой аллокации, а не после.
+  frames.length = 0
   return output.buffer
 }
 
@@ -183,9 +200,11 @@ function startFramed(settings, done, fail) {
   var finished = false
   var cancelled = false
   var captured = null
+  var totalBytes = 0
   lastReport = {
     mode: "pcm-auto-stop", frameEventAvailable: true, frameCount: 0,
-    frameBytes: [], signalMetrics: true, stoppedBySilence: false
+    frameBytes: [], totalBytes: 0, signalMetrics: true,
+    stoppedBySilence: false, stoppedByLimit: false
   }
 
   // A capture can end three ways and firmware disagrees about which one it
@@ -201,7 +220,7 @@ function startFramed(settings, done, fail) {
     active = null
     try { record.onframerecorded = null } catch (error) {}
     if (frames.length) {
-      done({ bytes: pcmFramesToWav(frames, 16000), contentType: "audio/wav",
+      done({ bytes: pcmFramesToWav(frames, FRAME_SAMPLE_RATE), contentType: "audio/wav",
         recordedMs: Date.now() - startedAt, capture: lastReport })
       return
     }
@@ -226,9 +245,24 @@ function startFramed(settings, done, fail) {
 
   record.onframerecorded = function(event) {
     if (finished || !event || !event.frameBuffer) return
+    // Потолок важнее фразы: переполненная куча убивает приложение целиком, а
+    // обрезанная запись всё ещё распознаётся. Кадры сверх потолка не копируем
+    // вообще — record.stop() отрабатывает не мгновенно, и прошивка успевает
+    // прислать ещё несколько.
+    if (totalBytes >= MAX_FRAME_BYTES) {
+      if (!stopping) {
+        stopping = true
+        lastReport.stoppedByLimit = true
+        stopRecording()
+      }
+      if (event.isLastFrame) settle(finishOk)()
+      return
+    }
     var frame = copyBytes(event.frameBuffer)
     frames.push(frame)
+    totalBytes += frame.length
     lastReport.frameCount += 1
+    lastReport.totalBytes = totalBytes
     if (lastReport.frameBytes.length < 12) lastReport.frameBytes.push(frame.length)
     var now = Date.now()
     var energy = rms16(frame)
@@ -260,9 +294,11 @@ function startFramed(settings, done, fail) {
   try {
     record.start({
       duration: settings.maxRecordingMs,
-      sampleRate: 16000,
+      // 8 кГц моно — значение модуля по умолчанию; по таблице документации
+      // ему соответствует битрейт 128000 для pcm/wav.
+      sampleRate: FRAME_SAMPLE_RATE,
       numberOfChannels: 1,
-      encodeBitRate: 256000,
+      encodeBitRate: 128000,
       frameSize: settings.frameSize,
       format: "pcm",
       // Recorded outside the guard as well: complete() may win the race with

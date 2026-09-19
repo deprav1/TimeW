@@ -80,7 +80,11 @@ const config = {
   recordingSilenceMs: Number(env.RECORDING_SILENCE_MS || 1000),
   recordingSpeechGraceMs: Number(env.RECORDING_SPEECH_GRACE_MS || 900),
   recordingFrameSize: Number(env.RECORDING_FRAME_SIZE || 2048),
-  autoStopEnabled: !["0", "false", "off"].includes(String(env.AUTO_STOP_ENABLED || "true").toLowerCase()),
+  // Автостоп по паузе выключен по умолчанию и включается явно. Потоковый режим
+  // @system.record по документации не отдаёт файл, когда задан frameSize, —
+  // значит весь PCM держится в куче часов, и на 16 кГц это выносило приложение
+  // целиком. Включать стоит только на прошивке, где это проверено на месте.
+  autoStopEnabled: ["1", "true", "on"].includes(String(env.AUTO_STOP_ENABLED || "").toLowerCase()),
   runtimeConfigRevision: env.TIMEW_CONFIG_REVISION || "voice-1",
   ttsFormat: env.TTS_FORMAT || (env.TTS_PROVIDER === "gemini" || (!env.TTS_PROVIDER && env.AI_PROVIDER === "gemini") ? "wav" : "mp3")
 };

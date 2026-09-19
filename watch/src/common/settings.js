@@ -27,7 +27,7 @@ var DEFAULTS = {
     requestTimeoutMs: 30000,
     uploadTimeoutMs: 60000,
     ttsFormat: "wav",
-    autoStop: true
+    autoStop: false
   }
 }
 
@@ -208,7 +208,9 @@ export function applyRemoteRuntime(runtime, done) {
   current.requestTimeoutMs = bounded(runtime.requestTimeoutMs, 8000, 60000, current.requestTimeoutMs)
   current.uploadTimeoutMs = bounded(runtime.uploadTimeoutMs, 15000, 120000, current.uploadTimeoutMs)
   current.ttsFormat = runtime.ttsFormat === "mp3" ? "mp3" : "wav"
-  current.autoStop = runtime.autoStop !== false
+  // Автостоп включается только явным true со шлюза: по умолчанию часы идут
+  // проверенным файловым путём Opus, который не держит запись в куче JS.
+  current.autoStop = runtime.autoStop === true
   cached.runtimeConfig = current
   cached.runtimeRevision = runtime.revision ? String(runtime.revision) : cached.runtimeRevision
   // One write instead of one write per field keeps the cold-start refresh

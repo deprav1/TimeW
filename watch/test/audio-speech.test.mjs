@@ -6,6 +6,30 @@ const { recordAudio, recordingCapability, cancelRecording, resetFrameSupport } =
 const { speak, stopSpeaking } = await import("../src/common/speech.js");
 const { applyRemoteRuntime } = await import("../src/common/settings.js");
 
+// Потоковый режим держит весь PCM в куче часов, поэтому он выключен по
+// умолчанию и включается только явным autoStop со шлюза.
+function enableAutoStop() {
+  return new Promise((resolve) => applyRemoteRuntime({ autoStop: true }, resolve));
+}
+
+function disableAutoStop() {
+  return new Promise((resolve) => applyRemoteRuntime({ autoStop: false }, resolve));
+}
+
+test("по умолчанию запись идёт файловым путём, а не потоковым", async () => {
+  resetAll();
+  resetFrameSupport();
+  await disableAutoStop();
+  record.scripted = { result: { uri: "internal://cache/rec-default.opus" } };
+  const formats = [];
+  const originalStart = record.start;
+  record.start = (options) => { formats.push(options.format); return originalStart.call(record, options) };
+  const result = await new Promise((resolve, reject) => recordAudio(resolve, reject));
+  record.start = originalStart;
+  assert.deepEqual(formats, ["opus"]);
+  assert.equal(result.uri, "internal://cache/rec-default.opus");
+});
+
 test("синхронный отказ записи возвращается как ошибка, а не вешает экран", async () => {
   resetAll();
   record.throwOnStart = true;
@@ -15,6 +39,7 @@ test("синхронный отказ записи возвращается ка
 
 test("кадры PCM собираются в WAV и возвращают отчёт автостопа", async () => {
   resetAll();
+  await enableAutoStop();
   const speech = new Uint8Array(2048);
   for (let i = 0; i < speech.length; i += 2) {
     speech[i] = 0x20;
@@ -32,6 +57,7 @@ test("кадры PCM собираются в WAV и возвращают отч�
 
 test("явная отмена framed-записи до первого кадра не запускает fallback", async () => {
   resetAll();
+  await enableAutoStop();
   record.scripted = { frames: [] };
   let completed = false;
   let failed = false;
@@ -49,6 +75,7 @@ test("явная отмена framed-записи до первого кадра
 test("прошивка без кадров отвечает сразу и одной записью", async () => {
   resetAll();
   resetFrameSupport();
+  await enableAutoStop();
   record.scripted = { result: { uri: "internal://cache/rec-1.opus" } };
   const originalStart = record.start;
   let starts = 0;
@@ -66,6 +93,7 @@ test("прошивка без кадров отвечает сразу и одн
 test("после записи без кадров потоковый режим больше не пробуется", async () => {
   resetAll();
   resetFrameSupport();
+  await enableAutoStop();
   record.scripted = { result: { uri: "internal://cache/rec-1.opus" } };
   await new Promise((resolve, reject) => recordAudio(resolve, reject));
   assert.equal(recordingCapability().framedUnsupported, true);
@@ -78,9 +106,29 @@ test("после записи без кадров потоковый режим 
   assert.deepEqual(formats, ["opus"], "второй заход идёт сразу файловым путём");
 });
 
+// Куча часов — жёсткая граница: документация @system.file прямо называет
+// переполнение памяти причиной падения приложения. Даже если прошивка шлёт
+// кадры дольше, чем отрабатывает record.stop(), в памяти не окажется больше
+// потолка.
+test("поток кадров обрезается по потолку памяти, а не копится бесконечно", async () => {
+  resetAll();
+  resetFrameSupport();
+  await enableAutoStop();
+  const loud = new Uint8Array(4096);
+  for (let i = 0; i < loud.length; i += 2) { loud[i] = 0x20; loud[i + 1] = 0x03 }
+  // 60 кадров по 4 КиБ = 240 КиБ, потолок — 96 КиБ.
+  record.scripted = { frames: Array.from({ length: 60 }, () => loud) };
+  const result = await new Promise((resolve, reject) => recordAudio(resolve, reject));
+  const wavBytes = new Uint8Array(result.bytes).length - 44;
+  assert.ok(wavBytes <= 96 * 1024, `в памяти осело ${wavBytes} байт при потолке ${96 * 1024}`);
+  assert.equal(result.capture.stoppedByLimit, true);
+  assert.equal(result.capture.totalBytes, wavBytes);
+});
+
 test("отчёт сохраняет marker PCM->Opus fallback", async () => {
   resetAll();
   resetFrameSupport();
+  await enableAutoStop();
   const originalStart = record.start;
   let starts = 0;
   record.start = (options) => {
