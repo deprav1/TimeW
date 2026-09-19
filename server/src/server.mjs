@@ -243,6 +243,22 @@ function boundedNumber(value, min, max, fallback) {
   return Math.min(max, Math.max(min, Math.round(number)));
 }
 
+function normalizedTtsFormat(value) {
+  return String(value || "").toLowerCase() === "wav" ? "wav" : "mp3";
+}
+
+function effectiveTtsProvider() {
+  return config.ttsProvider === "none" && config.provider === "openai-compatible"
+    ? "openai-compatible" : config.ttsProvider;
+}
+
+function effectiveTtsFormat(provider = effectiveTtsProvider(), requestedFormat = "") {
+  // Gemini returns raw PCM which this gateway always wraps in a WAV container;
+  // TTS_FORMAT cannot change that wire format.
+  return provider === "gemini" ? "wav" : (requestedFormat === "wav" || requestedFormat === "mp3"
+    ? requestedFormat : normalizedTtsFormat(config.ttsFormat));
+}
+
 // This is the only configuration surface sent to the watch.  It contains
 // tuning knobs and capability flags, never credentials, device ids, or
 // provider URLs.  Keep the shape compact: it is fetched on every cold start
@@ -257,7 +273,7 @@ function runtimeSettings() {
     frameSize: boundedNumber(config.recordingFrameSize, 512, 4096, 2048),
     requestTimeoutMs: boundedNumber(config.providerTimeoutMs + 15000, 15000, 75000, 35000),
     uploadTimeoutMs: boundedNumber(Math.max(config.providerTimeoutMs + 30000, 60000), 30000, 120000, 60000),
-    ttsFormat: config.ttsFormat === "mp3" ? "mp3" : "wav",
+    ttsFormat: effectiveTtsFormat(),
     autoStop: Boolean(config.autoStopEnabled),
     capabilities: {
       // Frame delivery is probed by the watch; the server cannot infer the
@@ -1171,13 +1187,17 @@ async function executeHomeCommand(command, deviceIds, { metrics, recordUndo = tr
   if (recordUndo) {
     const undoToken = randomUUID();
     const expiresAt = Date.now() + HOME_ACTION_TTL_MS;
-    await store.kvSet(LAST_HOME_ACTION_KEY, {
+    // The receipt is a single, process-wide "latest action" pointer. Keep
+    // updates on the same lock as conditional deletion in undoHomeCommand so
+    // an older undo can never erase a newer action's receipt while its inverse
+    // Tuya call is still in flight.
+    await withActionLock("home-receipt", () => store.kvSet(LAST_HOME_ACTION_KEY, {
       token: undoToken,
       command,
       deviceIds,
       executedAt: new Date().toISOString(),
       expiresAt
-    }, HOME_ACTION_TTL_MS);
+    }, HOME_ACTION_TTL_MS));
     result.undoToken = undoToken;
     result.undoExpiresAt = new Date(expiresAt).toISOString();
     result.undoAvailable = true;
@@ -1235,7 +1255,13 @@ async function undoHomeCommand(token, metrics) {
     // Keep the receipt until the inverse call succeeds. A transient Tuya
     // failure can then be retried safely; the lock prevents double toggles.
     const result = await executeHomeCommand(inverse, entry.deviceIds, { metrics, recordUndo: false, undo: true });
-    await store.kvDelete(LAST_HOME_ACTION_KEY);
+    // A newer action may have completed while the inverse Tuya call was in
+    // flight. Delete only the receipt we actually consumed, never whatever
+    // happens to be the latest receipt now.
+    await withActionLock("home-receipt", async () => {
+      const current = await store.kvGet(LAST_HOME_ACTION_KEY);
+      if (current?.token === entry.token) await store.kvDelete(LAST_HOME_ACTION_KEY);
+    });
     return { ...result, undoOf: entry.command };
   });
 }
@@ -1475,11 +1501,11 @@ async function synthesizeSpeechGemini(text) {
   return { audio: pcmToWav(Buffer.from(inline.data, "base64"), rate), contentType: "audio/wav" };
 }
 
-async function synthesizeSpeech(text) {
+async function synthesizeSpeech(text, requestedFormat = "") {
   // Runtime compatibility for tests/older local setups that switch the AI
   // provider object directly. Never inherit credentials from Gemini.
-  const ttsProvider = config.ttsProvider === "none" && config.provider === "openai-compatible"
-    ? "openai-compatible" : config.ttsProvider;
+  const ttsProvider = effectiveTtsProvider();
+  const ttsFormat = effectiveTtsFormat(ttsProvider, requestedFormat);
   const ttsApiKey = ttsProvider === "openai-compatible" && config.ttsApiKey
     ? config.ttsApiKey
     : (ttsProvider === "openai-compatible" && config.provider === "openai-compatible" ? config.apiKey : "");
@@ -1518,11 +1544,14 @@ async function synthesizeSpeech(text) {
       model: config.ttsModel,
       voice: config.ttsVoice,
       input: text,
-      response_format: "mp3"
+      response_format: ttsFormat
     })
   });
   if (!response.ok) await providerError(response, "TTS provider");
-  return { audio: Buffer.from(await response.arrayBuffer()), contentType: "audio/mpeg" };
+  return {
+    audio: Buffer.from(await response.arrayBuffer()),
+    contentType: ttsFormat === "wav" ? "audio/wav" : "audio/mpeg"
+  };
 }
 
 // Тип содержимого зависит от провайдера: OpenAI-совместимый отдаёт mp3,
@@ -1544,12 +1573,16 @@ function sendAudio(res, audioBuffer, contentType) {
 // @system.audio can only play a URL, not POST bytes.
 async function handleSpeak(req, res) {
   const startedAt = Date.now();
+  const requestedFormat = new URL(req.url, "http://localhost").searchParams.get("format") || "";
   const body = await jsonBody(req);
   const text = typeof body.text === "string" ? body.text.trim() : "";
   if (!text) return error(res, 400, "text is required");
   if (text.length > 1000) return error(res, 400, "text must be at most 1000 characters long");
-  const speech = await synthesizeSpeech(text);
-  console.log(`tts requestId=${requestId(req, body) || randomUUID()} provider=${Date.now() - startedAt} bytes=${speech.audio.length} total=${Date.now() - startedAt}`);
+  const providerStartedAt = Date.now();
+  const speech = await synthesizeSpeech(text, requestedFormat);
+  const providerMs = Date.now() - providerStartedAt;
+  const totalMs = Date.now() - startedAt;
+  console.log(`tts requestId=${requestId(req, body) || randomUUID()} provider=${providerMs} bytes=${speech.audio.length} total=${totalMs}`);
   sendAudio(res, speech.audio, speech.contentType);
 }
 
@@ -1559,12 +1592,16 @@ async function handleSpeak(req, res) {
 // with the device token in a header rather than the query string.
 async function handleSpeakById(req, res, id) {
   const startedAt = Date.now();
+  const requestedFormat = new URL(req.url, "http://localhost").searchParams.get("format") || "";
   const text = await takeSpeechText(id);
   if (text === null) {
     return error(res, 404, "Озвучка не найдена или устарела, запросите ответ заново", "not_found");
   }
-  const speech = await synthesizeSpeech(text);
-  console.log(`tts requestId=${id} provider=${Date.now() - startedAt} bytes=${speech.audio.length} total=${Date.now() - startedAt}`);
+  const providerStartedAt = Date.now();
+  const speech = await synthesizeSpeech(text, requestedFormat);
+  const providerMs = Date.now() - providerStartedAt;
+  const totalMs = Date.now() - startedAt;
+  console.log(`tts requestId=${id} provider=${providerMs} bytes=${speech.audio.length} total=${totalMs}`);
   sendAudio(res, speech.audio, speech.contentType);
 }
 

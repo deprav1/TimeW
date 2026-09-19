@@ -1,6 +1,6 @@
 import request from "@system.request"
 import audio from "@system.audio"
-import { getCached } from "./settings"
+import { getCached, getRecordingSettings } from "./settings"
 import { guard } from "./guard"
 import { UPLOAD_TIMEOUT_MS } from "./config"
 
@@ -66,6 +66,14 @@ function play(uri, done, fail) {
   }
 }
 
+function speechUrl(speechId) {
+  // The gateway owns the actual MIME type; this is only a format hint so a
+  // deployment can choose its configured codec without changing the watch.
+  // Playback still uses the downloaded file returned by the runtime.
+  var configured = getRecordingSettings().ttsFormat === "mp3" ? "mp3" : "wav"
+  return baseUrl() + "/api/v1/speak/" + encodeURIComponent(speechId) + "?format=" + configured
+}
+
 export function speak(speechId, done, fail) {
   if (!speechId) {
     fail({ message: "Нечего озвучивать" })
@@ -80,7 +88,7 @@ export function speak(speechId, done, fail) {
   })
   try {
     request.download({
-    url: baseUrl() + "/api/v1/speak/" + speechId,
+    url: speechUrl(speechId),
     header: downloadHeaders,
     success: settle(function(data) {
       var downloadToken = data && (data.token || data)

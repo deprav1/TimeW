@@ -35,7 +35,7 @@ import prompt from "@system.prompt"
 import vibrator from "@system.vibrator"
 import router from "@system.router"
 import { listNotes, deleteNote, voiceUri, voiceBytes, query } from "../../common/api"
-import { recordAudio, stopRecording } from "../../common/audio"
+import { recordAudio, stopRecording, cancelRecording } from "../../common/audio"
 import { getQueued, enqueueAudio, loadQueue } from "../../common/queue"
 import { getCachedNotes, saveCachedNotes, loadCachedNotes } from "../../common/notes-cache"
 import { loadSettings, getCached } from "../../common/settings"
@@ -158,6 +158,7 @@ export default {
     if (self.busy) {
       // Аварийный размыкатель на случай, если рантайм молчит.
       self.voiceEpoch += 1
+      cancelRecording()
       self.setBusy(false)
       self.dictateLabel = "Надиктовать"
       return
@@ -207,7 +208,7 @@ export default {
       self.errorText = "Нет связи — отправлю, когда появится сеть"
     }, function() {
       self.errorText = messageFrom(error)
-    }, error && error.requestKey)
+    }, error && error.requestKey, audio.bytes)
   },
 
   // Распознанное показываем до сохранения: неверно расслышанная заметка

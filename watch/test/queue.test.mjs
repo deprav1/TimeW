@@ -40,6 +40,33 @@ test("офлайн-запись сохраняет ключ уже начато�
   assert.equal(getQueued()[0].requestId, "voice-request-1");
 });
 
+test("офлайн PCM-байты сначала сохраняются в постоянный файл", async () => {
+  await fresh();
+  const bytes = new Uint8Array([0x52, 0x49, 0x46, 0x46]).buffer;
+  await new Promise((done, fail) => enqueueAudio(undefined, "audio/wav", done, fail, "pcm-request-1", bytes));
+  const queued = getQueued();
+  assert.equal(queued.length, 1);
+  assert.match(queued[0].uri, /^internal:\/\/files\/timew\/pending-/);
+  assert.deepEqual(Array.from(new Uint8Array(file.files[queued[0].uri])), [0x52, 0x49, 0x46, 0x46]);
+});
+
+test("PCM не сообщает об успехе, если рантайм не умеет сохранить байты", async () => {
+  await fresh();
+  const write = file.writeArrayBuffer;
+  file.writeArrayBuffer = undefined;
+  const result = await new Promise((resolve) => enqueueAudio(
+    undefined,
+    "audio/wav",
+    () => resolve("success"),
+    (error) => resolve(error),
+    "pcm-request-2",
+    new Uint8Array([1, 2]).buffer
+  ));
+  file.writeArrayBuffer = write;
+  assert.notEqual(result, "success");
+  assert.equal(getQueued().length, 0);
+});
+
 test("очередь переживает перезапуск приложения", async () => {
   await fresh();
   await new Promise((done) => enqueueAudio("internal://cache/a.opus", "audio/opus", done));

@@ -51,7 +51,7 @@ Access-Control-Max-Age: 86400
 эффективный режим и флаги возможностей без ключей и других секретов:
 
 ```json
-{"ok":true,"service":"timew-gateway","mode":"demo","provider":"mock","buildId":"local","configRevision":"voice-1","runtime":{"maxRecordingMs":10000,"silenceThreshold":450,"silenceDurationMs":1000,"speechGraceMs":900,"frameSize":2048,"requestTimeoutMs":35000,"uploadTimeoutMs":60000,"ttsFormat":"mp3","autoStop":true,"capabilities":{"frameRecording":true,"immediateLight":true,"undoLight":true}},"capabilities":{"ai":false,"notes":true,"speech":false,"home":false,"homeConfirmation":true,"immediateLight":false,"undoLight":false,"autoStop":true}}
+{"ok":true,"service":"timew-gateway","mode":"demo","provider":"mock","buildId":"local","configRevision":"voice-1","runtime":{"maxRecordingMs":10000,"silenceThreshold":450,"silenceDurationMs":1000,"speechGraceMs":900,"frameSize":2048,"requestTimeoutMs":35000,"uploadTimeoutMs":60000,"ttsFormat":"mp3","autoStop":true,"capabilities":{"frameRecording":"probe","immediateLight":false,"undoLight":false}},"capabilities":{"ai":false,"notes":true,"speech":false,"home":false,"homeConfirmation":false,"immediateLight":false,"undoLight":false,"autoStop":true}}
 ```
 
 ## Текстовый запрос
@@ -104,6 +104,12 @@ Tuya и возвращает квитанцию. Действие можно о�
 замки, ворота и сигнализация остаются заблокированными; неоднозначная комната
 или отсутствие карты устройств никогда не приводит к вызову Tuya.
 
+Для заблокированных категорий ответ содержит `requiresConfirmation:true`, но не
+содержит токена: подтверждение с часов намеренно не запускается, а команда
+остаётся только сообщением «нужна проверка на телефоне». Поле и endpoint
+`/api/v1/home/confirm` зарезервированы для будущего безопасного телефонного
+сценария и сейчас не являются рабочим путём управления.
+
 Если комната не распознана, `room` будет `null`, а `text` попросит уточнить. Это сознательная граница первой беты: Google Home SDK и OAuth появятся в Android-компаньоне после проверки видимости конкретных Tuya-светильников.
 
 Текст запроса нормализуется и обрезается до 500 символов. Тело JSON ограничено 64 KiB.
@@ -155,7 +161,7 @@ kind определяется так же, как в /api/v1/query: при inten
 
 Неизвестный или протухший идентификатор — 404. Синтез не настроен — 503.
 
-Для проверки с компьютера есть `POST /api/v1/speak` с телом `{"text":"…"}` (до 1000 символов), отдающий `audio/mpeg` напрямую.
+Для проверки с компьютера есть `POST /api/v1/speak` с телом `{"text":"…"}` (до 1000 символов), отдающий аудио напрямую. Формат — `audio/mpeg` или `audio/wav` согласно эффективной настройке шлюза; для OpenAI-совместимого провайдера можно безопасно указать разовый `?format=mp3|wav`. Gemini всегда возвращает WAV.
 
 При `AI_PROVIDER=gemini` TTS по умолчанию использует тот же `AI_API_KEY` и
 Gemini speech model; отдельный ключ не нужен. `TTS_PROVIDER=openai-compatible`,

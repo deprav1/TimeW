@@ -101,19 +101,26 @@ function fileOptions(settings, format) {
   }
 }
 
-function startFile(settings, done, fail, simplified) {
+function startFile(settings, done, fail, simplified, reportSeed) {
   var startedAt = Date.now()
-  lastReport = {
+  var cancelled = false
+  var nextReport = {
     mode: simplified ? "file-default" : "file-opus",
     frameEventAvailable: hasFrameEvents(), frameCount: 0, frameBytes: [],
     signalMetrics: false, stoppedBySilence: false
   }
+  if (reportSeed) {
+    Object.keys(reportSeed).forEach(function(key) { nextReport[key] = reportSeed[key] })
+    nextReport.mode = reportSeed.mode || nextReport.mode
+  }
+  lastReport = nextReport
   var settle = guard(Math.max(RECORD_TIMEOUT_MS, settings.maxRecordingMs + 8000), function() {
     stopRecording()
     fail(new Error("Запись не завершилась вовремя"))
   })
   var request = {
     success: settle(function(data) {
+      if (cancelled) return
       active = null
       var uri = data && (data.uri || data.path || data)
       if (!uri || typeof uri !== "string") {
@@ -124,6 +131,7 @@ function startFile(settings, done, fail, simplified) {
         recordedMs: Date.now() - startedAt, capture: lastReport })
     }),
     fail: settle(function(data, code) {
+      if (cancelled) return
       active = null
       var error = errorFrom(data, code, "Не удалось записать голос")
       if (!simplified && error.code === 202) {
@@ -135,7 +143,15 @@ function startFile(settings, done, fail, simplified) {
   }
   var options = fileOptions(settings, simplified ? "" : "opus")
   Object.keys(options).forEach(function(key) { request[key] = options[key] })
-  active = { mode: "file" }
+  active = {
+    mode: "file",
+    cancel: function() {
+      cancelled = true
+      if (settle.cancel) settle.cancel()
+      active = null
+      try { record.stop() } catch (error) {}
+    }
+  }
   try { record.start(request) } catch (error) {
     if (settle.cancel) settle.cancel()
     active = null
@@ -150,19 +166,20 @@ function startFramed(settings, done, fail) {
   var silenceStartedAt = 0
   var stopping = false
   var finished = false
+  var cancelled = false
   lastReport = {
     mode: "pcm-auto-stop", frameEventAvailable: true, frameCount: 0,
     frameBytes: [], signalMetrics: true, stoppedBySilence: false
   }
 
   function finishOk() {
-    if (finished) return
+    if (finished || cancelled) return
     finished = true
     active = null
     try { record.onframerecorded = null } catch (error) {}
     if (!frames.length) {
       lastReport.mode = "file-opus-fallback"
-      startFile(settings, done, fail, false)
+      startFile(settings, done, fail, false, lastReport)
       return
     }
     done({ bytes: pcmFramesToWav(frames, 16000), contentType: "audio/wav",
@@ -196,7 +213,17 @@ function startFramed(settings, done, fail) {
     if (event.isLastFrame) settle(finishOk)()
   }
 
-  active = { mode: "framed" }
+  active = {
+    mode: "framed",
+    cancel: function() {
+      cancelled = true
+      finished = true
+      if (settle.cancel) settle.cancel()
+      active = null
+      try { record.onframerecorded = null } catch (error) {}
+      try { record.stop() } catch (error) {}
+    }
+  }
   try {
     record.start({
       duration: settings.maxRecordingMs,
@@ -227,6 +254,17 @@ function startFramed(settings, done, fail) {
 }
 
 export function stopRecording() {
+  try { record.stop() } catch (error) {}
+}
+
+// Explicit cancellation is different from a natural stop (the latter lets
+// the runtime deliver the captured file). It must detach callbacks first so a
+// late complete event cannot trigger an Opus fallback or send stale audio.
+export function cancelRecording() {
+  if (active && typeof active.cancel === "function") {
+    active.cancel()
+    return
+  }
   try { record.stop() } catch (error) {}
 }
 

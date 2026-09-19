@@ -134,12 +134,53 @@ export function enqueue(text, done, fail, requestId) {
 // Откладывает саму запись: сети нет, распознать некому, но голос человека
 // терять нельзя. requestId фиксируется здесь и переживает перезапуск, чтобы
 // повторная досылка не создала вторую заметку.
-export function enqueueAudio(uri, contentType, done, fail, requestId) {
-  if (!uri) {
-    if (done) done(cache)
+export function enqueueAudio(uri, contentType, done, fail, requestId, bytes) {
+  // PCM auto-stop returns bytes rather than a file URI. Never report that
+  // recording as queued until it has been copied to the persistent files
+  // partition; otherwise the UI promises a later send while keeping nothing.
+  if (!uri && !bytes) {
+    if (fail) fail(new Error("Запись не найдена на часах"))
     return
   }
-  var fields = { kind: "audio", uri: uri, contentType: contentType || "", requestId: requestId || makeId() }
+  var fields = { kind: "audio", uri: uri || "", contentType: contentType || "", requestId: requestId || makeId() }
+  if (bytes) {
+    if (typeof file.writeArrayBuffer !== "function") {
+      if (fail) fail(new Error("Рантайм не умеет сохранять запись на часах"))
+      return
+    }
+    var byteSuffix = contentType === "audio/wav" ? ".wav" : contentType === "audio/opus" ? ".opus" : ".bin"
+    var byteUri = "internal://files/timew/pending-" + makeId() + byteSuffix
+    var write = guard(FILE_COPY_TIMEOUT_MS, function() {
+      if (fail) fail(new Error("Не удалось сохранить запись на часах"))
+    })
+    function persistBytes() {
+      try {
+        file.writeArrayBuffer({
+          uri: byteUri,
+          buffer: bytes,
+          success: write(function() {
+            fields.uri = byteUri
+            push(fields, done, fail)
+          }),
+          fail: write(function() {
+            if (fail) fail(new Error("Не удалось сохранить запись на часах"))
+          })
+        })
+      } catch (error) {
+        write(function() { if (fail) fail(error) })()
+      }
+    }
+    if (typeof file.mkdir === "function") {
+      try {
+        file.mkdir({ uri: "internal://files/timew", recursive: true, success: persistBytes, fail: persistBytes })
+      } catch (error) {
+        persistBytes()
+      }
+    } else {
+      persistBytes()
+    }
+    return
+  }
   // @system.record stores its result in internal://cache, which Vela may
   // purge under storage pressure. Copy it to the persistent files partition
   // before reporting that the offline item was saved. Unknown URI schemes or

@@ -48,7 +48,7 @@ import prompt from "@system.prompt"
 import vibrator from "@system.vibrator"
 import router from "@system.router"
 import { query, voiceUri, voiceBytes, status as fetchStatus, resetDialog, confirmHome, undoHome } from "../../common/api"
-import { recordAudio, stopRecording } from "../../common/audio"
+import { recordAudio, stopRecording, cancelRecording } from "../../common/audio"
 import { loadSettings, getCached, getRecordingSettings, applyRemoteRuntime } from "../../common/settings"
 import { speak } from "../../common/speech"
 import { isOnline } from "../../common/net"
@@ -144,7 +144,7 @@ export default {
     if (!this.busy) return
     this.voiceEpoch += 1
     this.stopTicker()
-    if (this.recording) stopRecording()
+    if (this.recording) cancelRecording()
     this.recording = false
     this.setBusy(false)
     this.status = "готов"

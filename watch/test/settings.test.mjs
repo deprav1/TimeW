@@ -109,3 +109,21 @@ test("настройки записи обновляются со шлюза, о
   const reloaded = await load();
   assert.equal(reloaded.runtimeConfig.maxRecordingMs, 12000);
 });
+
+test("переключение настройки не затирает runtime-конфиг и способ доставки", async () => {
+  resetAll();
+  await load();
+  await new Promise((resolve) => applyRemoteRuntime({
+    revision: "runtime-7",
+    maxRecordingMs: 14000,
+    ttsFormat: "mp3"
+  }, resolve));
+  rememberTransferMode("upload");
+
+  await new Promise((done, fail) => saveSettings({ speakAnswers: true }, done, fail));
+  const saved = await load();
+  assert.equal(saved.runtimeRevision, "runtime-7");
+  assert.equal(saved.runtimeConfig.maxRecordingMs, 14000);
+  assert.equal(saved.runtimeConfig.ttsFormat, "mp3");
+  assert.equal(saved.transferMode, "upload");
+});

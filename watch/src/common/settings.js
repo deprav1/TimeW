@@ -168,9 +168,17 @@ function writeKeys(index, values, done, fail) {
 }
 
 export function saveSettings(settings, done, fail) {
-  var values = copyDefaults()
+  // This function is called for small UI changes (voice/model toggles). Start
+  // from the live cache so a toggle cannot erase the runtime configuration
+  // fetched from the gateway or the last transfer mode.
+  var values = {}
   KEYS.forEach(function(key) {
-    if (settings[key] !== undefined && settings[key] !== null) values[key] = settings[key]
+    values[key] = key === "runtimeConfig" ? copyRuntime(cached.runtimeConfig) : cached[key]
+  })
+  KEYS.forEach(function(key) {
+    if (settings && settings[key] !== undefined && settings[key] !== null) {
+      values[key] = key === "runtimeConfig" ? copyRuntime(settings[key]) : settings[key]
+    }
   })
   values.gatewayUrl = normalizeUrl(values.gatewayUrl || GATEWAY_URL)
   values.deviceToken = values.deviceToken || ""

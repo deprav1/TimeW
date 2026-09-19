@@ -94,6 +94,12 @@ export const file = {
     file.files[dstUri] = bytes;
     if (success) success(dstUri);
   },
+  writeArrayBuffer({ uri, buffer, success, fail }) {
+    if (file.silent) return;
+    if (!buffer) return void (fail && fail({ message: "empty buffer" }));
+    file.files[uri] = buffer;
+    if (success) success(uri);
+  },
   delete({ uri, success, fail }) {
     if (file.files[uri] === undefined) return void (fail && fail({ message: "file not found" }));
     delete file.files[uri];
@@ -110,9 +116,11 @@ export const request = {
   // что метода нет. Тесты опираются на это, чтобы фолбэк проверялся всерьёз.
   downloadResult: null,
   completeResult: null,
+  downloadCalls: [],
   throwOnDownload: false,
   throwOnComplete: false,
   download(options) {
+    request.downloadCalls.push(options);
     if (request.throwOnDownload) throw new Error("download unavailable");
     const next = request.downloadResult;
     if (!next) return;
@@ -131,6 +139,7 @@ export const request = {
   reset() {
     request.downloadResult = null;
     request.completeResult = null;
+    request.downloadCalls = [];
     request.throwOnDownload = false;
     request.throwOnComplete = false;
   }

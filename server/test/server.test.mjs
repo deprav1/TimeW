@@ -216,6 +216,70 @@ test("parallel retries of one light request execute Tuya only once", async () =>
   });
 });
 
+test("undoing an older light action cannot delete a newer action receipt", async () => {
+  let commandCalls = 0;
+  let undoStarted;
+  const undoEntered = new Promise((resolve) => { undoStarted = resolve; });
+  let releaseUndo;
+  const undoGate = new Promise((resolve) => { releaseUndo = resolve; });
+
+  await withMockTuya(async (req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    if (req.method === "GET" && url.pathname === "/v1.0/token") return tokenHandler("tok-receipt-race")(res);
+    if (req.method === "POST" && url.pathname.includes("/commands")) {
+      commandCalls += 1;
+      if (commandCalls === 2) {
+        // Hold the inverse of action A in flight. Action B is allowed to
+        // complete and publish its receipt while A is still being undone.
+        undoStarted();
+        await undoGate;
+      }
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ success: true, result: true }));
+  }, async () => {
+    await writeFile(devicesJsonPath, JSON.stringify({ bedroom: ["dev-receipt-race"] }), "utf8");
+    const first = await fetch(`${base}/api/v1/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": "receipt-race-a" },
+      body: JSON.stringify({ text: "включи свет в спальне", requestId: "receipt-race-a" })
+    });
+    const firstBody = await first.json();
+    assert.equal(first.status, 200);
+    assert.ok(firstBody.undoToken);
+
+    const undoPromise = fetch(`${base}/api/v1/home/undo`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ undoToken: firstBody.undoToken })
+    });
+    await undoEntered;
+
+    const second = await fetch(`${base}/api/v1/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": "receipt-race-b" },
+      body: JSON.stringify({ text: "включи свет в спальне", requestId: "receipt-race-b" })
+    });
+    const secondBody = await second.json();
+    assert.equal(second.status, 200);
+    assert.ok(secondBody.undoToken);
+    assert.notEqual(secondBody.undoToken, firstBody.undoToken);
+
+    releaseUndo();
+    const undone = await undoPromise;
+    assert.equal(undone.status, 200);
+
+    // The newer receipt must remain usable after the older inverse finishes.
+    const undoSecond = await fetch(`${base}/api/v1/home/undo`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ undoToken: secondBody.undoToken })
+    });
+    assert.equal(undoSecond.status, 200);
+    assert.equal(commandCalls, 4, "A, inverse A, B, inverse B");
+  });
+});
+
 test("POST /api/v1/query with a note creates a note visible via GET /api/v1/notes", async () => {
   const res = await fetch(`${base}/api/v1/query`, {
     method: "POST",
@@ -1444,7 +1508,10 @@ test("POST /api/v1/speak without a configured provider/key returns 503", async (
   assert.equal(body.ok, false);
 });
 
-test("POST /api/v1/speak with a mock TTS provider streams back audio/mpeg", async () => {
+test("POST /api/v1/speak with a mock TTS provider streams back audio/mpeg", async (t) => {
+  const originalFormat = config.ttsFormat;
+  config.ttsFormat = "mp3";
+  t.after(() => { config.ttsFormat = originalFormat; });
   const fakeAudio = Buffer.from([0xff, 0xfb, 0x90, 0x00, 1, 2, 3, 4]);
   await withMockOpenAI(
     (req, res) => {
@@ -1463,6 +1530,36 @@ test("POST /api/v1/speak with a mock TTS provider streams back audio/mpeg", asyn
       assert.equal(Buffer.compare(received, fakeAudio), 0);
     }
   );
+});
+
+test("OpenAI-compatible TTS honours a safe format override and reports the wire format", async (t) => {
+  const originalFormat = config.ttsFormat;
+  config.ttsFormat = "mp3";
+  t.after(() => { config.ttsFormat = originalFormat; });
+  let requestBody;
+  const fakeWav = Buffer.from("RIFFfake-wav");
+  await withMockOpenAI((req, res) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      requestBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      res.writeHead(200, { "Content-Type": "audio/wav" });
+      res.end(fakeWav);
+    });
+  }, async () => {
+    const response = await fetch(`${base}/api/v1/speak?format=wav`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "формат" })
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "audio/wav");
+    assert.equal((await response.arrayBuffer()).byteLength, fakeWav.length);
+    assert.equal(requestBody.response_format, "wav");
+
+    const status = await (await fetch(`${base}/api/v1/status`)).json();
+    assert.equal(status.runtime.ttsFormat, "mp3", "status reports configured default, not a one-request override");
+  });
 });
 
 test("POST /api/v1/speak with empty text returns 400", async () => {
@@ -1560,6 +1657,9 @@ test("GET /api/v1/speak/:id without a configured TTS provider returns 503", asyn
 
 test("GET /api/v1/speak/:id with a mock TTS provider streams the exact registered text as audio/mpeg", async (t) => {
   t.after(() => resetSpeechRegistry());
+  const originalFormat = config.ttsFormat;
+  config.ttsFormat = "mp3";
+  t.after(() => { config.ttsFormat = originalFormat; });
   const fakeAudio = Buffer.from([0xff, 0xfb, 0x90, 0x00, 9, 9, 9]);
   let receivedBody = null;
   let callCount = 0;
@@ -1701,6 +1801,42 @@ test("озвучка через Gemini идёт тем же ключом и во
       assert.ok(sentBody.generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName);
     }
   );
+});
+
+test("лог TTS отделяет время провайдера от полного времени запроса", async () => {
+  await withMockOpenAI((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "Content-Type": "audio/mpeg" });
+      res.end(Buffer.alloc(8));
+    });
+  }, async () => {
+    const lines = [];
+    const originalLog = console.log;
+    console.log = (...args) => lines.push(args.join(" "));
+    try {
+      const response = await new Promise((resolve, reject) => {
+        const request = http.request(new URL(`${base}/api/v1/speak`), {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Transfer-Encoding": "chunked" }
+        }, (res) => {
+          res.resume();
+          res.on("end", () => resolve(res));
+        });
+        request.on("error", reject);
+        request.write('{"text":"Пр');
+        setTimeout(() => request.end('ивет"}'), 60);
+      });
+      assert.equal(response.statusCode, 200);
+    } finally {
+      console.log = originalLog;
+    }
+    const line = lines.find((value) => value.startsWith("tts requestId="));
+    assert.ok(line, `TTS log was not emitted: ${lines.join(" | ")}`);
+    const match = line.match(/provider=(\d+) bytes=\d+ total=(\d+)/);
+    assert.ok(match, line);
+    assert.ok(Number(match[2]) > Number(match[1]), `total should include request parsing: ${line}`);
+  });
 });
 
 test("частота берётся из ответа, а не зашита: иначе звук пойдёт не на той скорости", async (t) => {
