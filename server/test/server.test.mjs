@@ -148,7 +148,7 @@ test("GET /api/v1/status is protected and reports capabilities without secrets",
     assert.equal(body.mode, "demo");
     assert.equal(body.buildId, config.buildId);
     assert.equal(body.capabilities.notes, true);
-    assert.equal(body.capabilities.homeConfirmation, true);
+    assert.equal(body.capabilities.homeConfirmation, false);
     assert.equal(body.capabilities.immediateLight, false);
     assert.equal(body.runtime.autoStop, true);
     assert.ok(body.runtime.revision);

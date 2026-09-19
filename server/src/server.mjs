@@ -1593,7 +1593,9 @@ async function route(req, res) {
         notes: true,
         speech: ttsAvailable(),
         home: isTuyaEnabled(),
-        homeConfirmation: true,
+        // Unsafe home classes are intentionally not executable yet, so there
+        // is no active confirmation workflow to advertise.
+        homeConfirmation: false,
         immediateLight: isTuyaEnabled(),
         undoLight: isTuyaEnabled(),
         autoStop: Boolean(config.autoStopEnabled)
