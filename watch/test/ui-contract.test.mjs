@@ -2,8 +2,9 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 
-const root = join(process.cwd(), "src", "pages")
+const root = join(fileURLToPath(new URL("../src/pages/", import.meta.url)))
 
 async function page(name) {
   return readFile(join(root, name, `${name}.ux`), "utf8")
