@@ -31,7 +31,10 @@ const config = {
   baseUrl: (env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, ""),
   model: env.AI_MODEL || "gpt-4o-mini",
   transcribeModel: env.TRANSCRIBE_MODEL || "whisper-1",
-  geminiModel: env.GEMINI_MODEL || "gemini-3.6-flash",
+  // Модель выбрана замером, а не номером версии: на нашем голосовом запросе
+  // (аудио + схема ответа) 3.8-flash отвечает за 1,85 с против 2,86 с у
+  // 3.6-flash. Повторить замер: npm run models -- --bench.
+  geminiModel: env.GEMINI_MODEL || "gemini-3.8-flash",
   maxAudioBytes: Number(env.MAX_AUDIO_BYTES || 1048576),
   providerTimeoutMs: Number(env.AI_TIMEOUT_MS || 20000),
   rateLimitMax: Number(env.RATE_LIMIT_MAX || 120),
@@ -54,6 +57,9 @@ const config = {
   ttsProvider: env.TTS_PROVIDER || (env.AI_PROVIDER === "gemini" ? "gemini" : env.AI_PROVIDER === "openai" ? "openai-compatible" : "none"),
   // Модель и голос Gemini для синтеза. Голоса перечислены в документации
   // Gemini TTS; Kore — нейтральный женский, хорошо читает по-русски.
+  // Озвучка остаётся на 3.1: она же и самая быстрая из доступных TTS —
+  // 3,2 с против 3,4 с у 2.5-flash-preview-tts. Моделей новее для звука у
+  // ключа нет.
   geminiTtsModel: env.GEMINI_TTS_MODEL || "gemini-3.1-flash-tts-preview",
   geminiTtsVoice: env.GEMINI_TTS_VOICE || "Kore",
   ttsApiKey: env.TTS_API_KEY || (env.AI_PROVIDER === "openai" ? env.AI_API_KEY || "" : ""),

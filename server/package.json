@@ -8,7 +8,8 @@
     "start": "node src/server.mjs",
     "test": "node --test",
     "smoke": "node scripts/smoke.mjs",
-    "diag": "node scripts/diag.mjs"
+    "diag": "node scripts/diag.mjs",
+    "models": "node scripts/models.mjs"
   },
   "engines": {
     "node": ">=20"
