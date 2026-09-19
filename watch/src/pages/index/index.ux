@@ -92,6 +92,13 @@ export default {
         self.errorText = "Шлюз не настроен"
         return
       }
+      // onShow срабатывает заново каждый раз, когда экран гаснет и зажигается
+      // — документация Vela отдельно предупреждает не вешать на него запрос
+      // без оглядки. На часах экран гаснет постоянно, поэтому синхронизация
+      // идёт по тому же 30-секундному окну, что и остальное.
+      var now = Date.now()
+      if (self.lastSyncAt && now - self.lastSyncAt < 30000) return
+      self.lastSyncAt = now
       // Runtime tuning is protected by the same device token and cached for
       // offline use. A failed refresh is intentionally silent: the last
       // known-good values and conservative local defaults remain usable.
@@ -102,15 +109,23 @@ export default {
           self.homeLabel = self.homeAvailable ? "Дом" : "Дом · нет"
         }
       }, function() {})
-      var now = Date.now()
-      if (self.lastSyncAt && now - self.lastSyncAt < 30000) return
-      self.lastSyncAt = now
       // Кэш заметок нужен экрану заметок, но читаем его здесь: приложение
       // открывается с этого экрана, и к переходу список уже готов.
       loadCachedNotes(function() {
         loadQueue(function() { self.flushQueue() })
       })
     })
+  },
+
+  // Документация по памяти требует гасить незавершённые таймеры при разрушении
+  // страницы. Счётчик — это setInterval: без этого он продолжал бы тикать
+  // после ухода со страницы, удерживая замыкание на всю вьюмодель.
+  onDestroy() {
+    this.stopTicker()
+    if (this.undoTimer) {
+      clearTimeout(this.undoTimer)
+      this.undoTimer = 0
+    }
   },
 
   // Досылка отложенных заметок идёт молча и не поднимает флаг занятости:

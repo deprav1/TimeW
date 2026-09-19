@@ -21,6 +21,28 @@ test("main screen keeps the high-frequency actions large and explicit", async ()
   assert.doesNotMatch(source, /onclick="unstick"\s*class="status"/)
 })
 
+// Документация Vela по памяти: «Clear unfinished timers when the page is
+// destroyed». Счётчик главного экрана — setInterval, он пережил бы уход со
+// страницы и держал бы всю вьюмодель.
+test("main screen clears its timers when the page is destroyed", async () => {
+  const source = await page("index")
+  assert.match(source, /onDestroy\(\)\s*\{/)
+  const destroy = source.slice(source.indexOf("onDestroy()"))
+  assert.match(destroy.slice(0, 300), /stopTicker\(\)/)
+  assert.match(destroy.slice(0, 300), /clearTimeout\(this\.undoTimer\)/)
+})
+
+// Там же: onShow срабатывает заново при каждом включении экрана, поэтому
+// запрос в нём должен быть под ограничителем частоты.
+test("main screen does not refetch status on every screen wake", async () => {
+  const source = await page("index")
+  const show = source.slice(source.indexOf("onShow()"), source.indexOf("onDestroy()"))
+  const throttle = show.indexOf("lastSyncAt")
+  const fetchCall = show.indexOf("fetchStatus(")
+  assert.ok(throttle > -1 && fetchCall > -1, "ожидались и ограничитель, и запрос статуса")
+  assert.ok(throttle < fetchCall, "fetchStatus должен стоять после проверки lastSyncAt")
+})
+
 test("answer screen never exposes a dead speech control", async () => {
   const source = await page("answer")
   assert.match(source, /if="\{\{canSpeak\}\}"/) 
