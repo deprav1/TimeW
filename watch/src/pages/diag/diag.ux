@@ -38,10 +38,12 @@ import request from "@system.request"
 import prompt from "@system.prompt"
 import audio from "@system.audio"
 import file from "@system.file"
+import volume from "@system.volume"
 import { loadSettings, getCached } from "../../common/settings"
 import { networkType } from "../../common/net"
 import { sendDiagnostics } from "../../common/api"
 import { recordAudio, recordingCapability } from "../../common/audio"
+import { mediaVolume, lastPlaybackReport } from "../../common/speech"
 import { CONFIG_STAMP } from "../../common/config"
 import { VERSION_CODE } from "../../common/build-info"
 
@@ -108,7 +110,8 @@ export default {
         probe("request", request, ["upload", "download", "onDownloadComplete"]),
         probe("prompt", prompt, ["show", "showDialog", "showToast"]),
         probe("audio", audio, ["play", "pause", "stop"]),
-        probe("file", file, ["readArrayBuffer", "move", "delete", "writeArrayBuffer"])
+        probe("file", file, ["readArrayBuffer", "move", "delete", "writeArrayBuffer"]),
+        probe("volume", volume, ["getMediaValue", "setMediaValue"])
       ],
       steps: []
     }
@@ -198,7 +201,7 @@ export default {
     ]
     if (index >= targets.length) {
       report.tls = self.tlsResults
-      self.probeRecording(report)
+      self.probeSpeech(report, function() { self.probeRecording(report) })
       return
     }
     if (index === 0) self.tlsResults = []
@@ -215,6 +218,26 @@ export default {
   // Короткая пробная запись: какой формат на самом деле выдаёт рантайм.
   // Расширение файла врёт — из-за этого шлюз отправлял провайдеру
   // application/octet-stream, и запись отклонялась.
+  // Тишина при озвучке и сломанная озвучка выглядят одинаково. Громкость и
+  // состояние последнего воспроизведения различают их за один взгляд.
+  probeSpeech(report, next) {
+    var self = this
+    if (self.cancelled) return
+    self.progressText = "проверяю звук"
+    mediaVolume(function(value) {
+      if (self.cancelled) return
+      report.mediaVolume = value
+      var playback = lastPlaybackReport()
+      report.playback = playback
+      self.add("громкость", value < 0 ? "модуль недоступен" :
+        value < 0.05 ? "в нуле — озвучку не слышно" : Math.round(value * 100) + "%")
+      if (playback.started || playback.error) {
+        self.add("озвучка", playback.started ? "последняя дошла до проигрывания" : "последняя не дошла: " + playback.error)
+      }
+      next()
+    })
+  },
+
   probeRecording(report) {
     var self = this
     if (self.cancelled) return

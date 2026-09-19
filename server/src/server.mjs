@@ -108,6 +108,9 @@ const HOME_ACTION_TTL_MS = 30 * 1000;
 const IDEMPOTENCY_PREFIX = "idem:";
 const CONFIRMATION_PREFIX = "confirm:";
 const HOME_ACTION_PREFIX = "home-action:";
+const DIAG_KEY = "diag:last";
+const DIAG_KEEP = 5;
+const DIAG_TTL_MS = 24 * 60 * 60 * 1000;
 const LAST_HOME_ACTION_KEY = HOME_ACTION_PREFIX + "last";
 const ACTION_LOCKS = new Map();
 const HOME_RESULTS = new Map();
@@ -1733,7 +1736,21 @@ async function route(req, res) {
     const body = await jsonBody(req);
     const report = JSON.stringify(body).slice(0, 4000);
     console.log(`${new Date().toISOString()} DIAG ${report}`);
+    // Лог хостинга читается только из его консоли, а отчёт нужен именно тогда,
+    // когда часы ведут себя не так. Держим последние несколько под тем же
+    // токеном, чтобы их можно было забрать запросом.
+    await store.kvSet(DIAG_KEY, {
+      reports: [
+        { receivedAt: new Date().toISOString(), buildId: config.buildId, report },
+        ...((await store.kvGet(DIAG_KEY))?.reports || [])
+      ].slice(0, DIAG_KEEP)
+    }, DIAG_TTL_MS);
     return json(res, 200, { ok: true, received: report.length, buildId: config.buildId });
+  }
+
+  if (req.method === "GET" && pathname === "/api/v1/diag") {
+    const entry = await store.kvGet(DIAG_KEY);
+    return json(res, 200, { ok: true, reports: entry?.reports || [] });
   }
 
   if (req.method === "POST" && pathname === "/api/v1/dialog/reset") {

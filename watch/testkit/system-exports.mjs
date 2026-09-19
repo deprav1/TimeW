@@ -10,6 +10,7 @@ export {
   vibrator,
   router,
   audio,
+  volume,
   media
 } from "./system.mjs";
 

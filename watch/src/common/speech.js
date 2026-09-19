@@ -1,5 +1,6 @@
 import request from "@system.request"
 import audio from "@system.audio"
+import volume from "@system.volume"
 import { getCached, getRecordingSettings } from "./settings"
 import { guard } from "./guard"
 import { UPLOAD_TIMEOUT_MS } from "./config"
@@ -31,39 +32,106 @@ function messageForStatus(status) {
 }
 
 var activeFinish = null
+var lastPlayback = { started: false, error: "", volume: -1 }
+
+// Пока воспроизведение не началось, ждём недолго: рантайм, не принявший файл,
+// может не прислать ни ended, ни error — и экран остался бы в состоянии «Стоп»
+// навсегда. После старта сторож растягивается, потому что длинный ответ
+// проигрывается минуты.
+var PLAY_START_TIMEOUT_MS = 8000
+var PLAY_MAX_MS = 180000
 
 function play(uri, done, fail) {
   var settled = false
+  var started = false
+  var timer = 0
+
+  function arm(ms, onTimeout) {
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(function() { timer = 0; onTimeout() }, ms)
+    // В Vela setTimeout возвращает число и unref нет — проверка безвредна.
+    // В Node долгий сторож иначе держал бы процесс тестов открытым.
+    if (timer && typeof timer.unref === "function") timer.unref()
+  }
+
+  function detach() {
+    if (timer) { clearTimeout(timer); timer = 0 }
+    audio.onended = null
+    audio.onstop = null
+    audio.onerror = null
+    audio.onplay = null
+    audio.onloadeddata = null
+  }
+
   function finishOk() {
     if (settled) return
     settled = true
     if (activeFinish === finishOk) activeFinish = null
-    audio.onended = null
-    audio.onstop = null
-    audio.onerror = null
+    detach()
     if (done) done()
   }
   function finishError(error) {
     if (settled) return
     settled = true
     if (activeFinish === finishOk) activeFinish = null
-    audio.onended = null
-    audio.onstop = null
-    audio.onerror = null
+    detach()
+    lastPlayback.error = (error && error.message) || "ошибка"
     if (fail) fail(error || { message: "Часы не смогли проиграть ответ" })
   }
+
+  function markStarted() {
+    if (started) return
+    started = true
+    lastPlayback.started = true
+    arm(PLAY_MAX_MS, finishOk)
+  }
+
   activeFinish = finishOk
+  lastPlayback = { started: false, error: "", volume: lastPlayback.volume }
   try {
     audio.onended = finishOk
     // A stop is terminal for the UI too: the user explicitly asked to stop.
     audio.onstop = finishOk
     audio.onerror = function() { finishError({ message: "Часы не смогли проиграть ответ" }) }
+    // Оба события означают «файл принят»: дальше ждать нечего, кроме конца.
+    audio.onplay = markStarted
+    audio.onloadeddata = markStarted
     audio.src = uri
     if (typeof audio.play !== "function") throw new Error("audio.play is unavailable")
+    arm(PLAY_START_TIMEOUT_MS, function() {
+      finishError({ message: "Часы не проиграли ответ" })
+    })
     audio.play()
   } catch (error) {
     finishError({ message: "Часы не смогли проиграть ответ" })
   }
+}
+
+// Громкость мультимедиа — системная настройка человека, менять её приложение
+// не должно. Но прочитать стоит: при нуле озвучка отработает штатно и молча,
+// и без этой проверки причина выглядит как «озвучка не работает».
+export function mediaVolume(done) {
+  var settle = guard(1000, function() { done(-1) })
+  try {
+    if (!volume || typeof volume.getMediaValue !== "function") {
+      settle(function() { done(-1) })()
+      return
+    }
+    volume.getMediaValue({
+      success: settle(function(data) {
+        var value = data && typeof data.value === "number" ? data.value : -1
+        lastPlayback.volume = value
+        done(value)
+      }),
+      fail: settle(function() { done(-1) })
+    })
+  } catch (error) {
+    settle(function() { done(-1) })()
+  }
+}
+
+export function lastPlaybackReport() {
+  return { started: lastPlayback.started, error: lastPlayback.error, volume: lastPlayback.volume }
 }
 
 function speechUrl(speechId) {
@@ -79,6 +147,18 @@ export function speak(speechId, done, fail) {
     fail({ message: "Нечего озвучивать" })
     return
   }
+  // Ноль громкости даёт ровно то же наблюдаемое поведение, что и сломанная
+  // озвучка: тишина. Разница в одну строку на экране экономит час поисков.
+  mediaVolume(function(value) {
+    if (value >= 0 && value < 0.05) {
+      fail({ message: "Звук на часах выключен" })
+      return
+    }
+    download(speechId, done, fail)
+  })
+}
+
+function download(speechId, done, fail) {
   var downloadHeaders = {}
   var token = getCached().deviceToken
   if (token) downloadHeaders["X-TimeW-Device-Token"] = token

@@ -180,6 +180,20 @@ test("the /api/v1/status example in docs/protocol.md matches the real payload", 
   assert.deepEqual({ ...actual, buildId: documented.buildId }, documented);
 });
 
+test("a diagnostics report can be read back instead of only reaching the host log", async () => {
+  const posted = await fetch(`${base}/api/v1/diag`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ capture: { mode: "pcm-no-frames-file" }, mediaVolume: 0 })
+  });
+  assert.equal(posted.status, 200);
+  const res = await fetch(`${base}/api/v1/diag`);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.ok(body.reports.length >= 1);
+  assert.match(body.reports[0].report, /pcm-no-frames-file/);
+  assert.ok(body.reports[0].receivedAt);
+});
+
 test("query idempotency key returns the original note and does not duplicate it", async () => {
   const headers = { "Content-Type": "application/json", "Idempotency-Key": "note-once-1" };
   const first = await fetch(`${base}/api/v1/query`, { method: "POST", headers, body: JSON.stringify({ text: "Запиши: idempotent note" }) });

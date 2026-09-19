@@ -162,6 +162,19 @@ export const prompt = {
   }
 };
 
+export const volume = {
+  value: 0.6,
+  available: true,
+  getMediaValue(options) {
+    if (!volume.available) { options.fail && options.fail({}, 200); return; }
+    setTimeout(() => options.success && options.success({ value: volume.value }), 0);
+  },
+  reset() {
+    volume.value = 0.6;
+    volume.available = true;
+  }
+};
+
 export const record = {
   scripted: null,
   throwOnStart: false,
@@ -198,15 +211,26 @@ export const audio = {
   onended: null,
   onstop: null,
   onerror: null,
+  onplay: null,
+  onloadeddata: null,
   playCalls: 0,
-  play() { audio.playCalls += 1; },
+  // Прошивка сообщает о начале воспроизведения; без этого сторож в speech.js
+  // считает, что файл не приняли. Умолчание повторяет здоровое поведение.
+  autoStart: true,
+  play() {
+    audio.playCalls += 1;
+    if (audio.autoStart && audio.onplay) audio.onplay();
+  },
   stop() { if (audio.onstop) audio.onstop(); },
   reset() {
     audio.src = "";
     audio.onended = null;
     audio.onstop = null;
     audio.onerror = null;
+    audio.onplay = null;
+    audio.onloadeddata = null;
     audio.playCalls = 0;
+    audio.autoStart = true;
   }
 };
 export const media = {};
@@ -220,5 +244,6 @@ export function resetAll() {
   prompt.reset();
   record.reset();
   audio.reset();
+  volume.reset();
   router.reset();
 }

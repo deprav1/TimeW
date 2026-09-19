@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { audio, record, request, resetAll } from "../testkit/system.mjs";
+import { audio, record, request, volume, resetAll } from "../testkit/system.mjs";
 
 const { recordAudio, recordingCapability, cancelRecording, resetFrameSupport } = await import("../src/common/audio.js");
-const { speak, stopSpeaking } = await import("../src/common/speech.js");
+const { speak, stopSpeaking, mediaVolume, lastPlaybackReport } = await import("../src/common/speech.js");
 const { applyRemoteRuntime } = await import("../src/common/settings.js");
 
 // Потоковый режим держит весь PCM в куче часов, поэтому он выключен по
@@ -142,6 +142,40 @@ test("отчёт сохраняет marker PCM->Opus fallback", async () => {
   record.start = originalStart;
   assert.equal(result.capture.mode, "file-opus-fallback");
   assert.equal(recordingCapability().last.mode, "file-opus-fallback");
+});
+
+// Нулевая громкость выглядит ровно как сломанная озвучка — тишина. Часы
+// обязаны назвать причину, а не молчать.
+test("нулевая громкость объясняется словами и не тратит загрузку", async () => {
+  resetAll();
+  volume.value = 0;
+  request.downloadResult = { result: { token: "download-silent" } };
+  const error = await new Promise((resolve) => speak("speech-1", () => resolve(null), resolve));
+  assert.match(error.message, /Звук на часах/i);
+  assert.equal(request.downloadCalls.length, 0, "качать озвучку, которую не слышно, незачем");
+});
+
+test("отсутствие модуля громкости не блокирует озвучку", async () => {
+  resetAll();
+  volume.available = false;
+  const value = await new Promise((resolve) => mediaVolume(resolve));
+  assert.equal(value, -1);
+  request.downloadResult = { result: { token: "download-novol" } };
+  request.completeResult = { result: { uri: "internal://files/reply.wav" } };
+  speak("speech-1", () => {}, (error) => assert.fail(error.message));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(audio.playCalls, 1);
+});
+
+test("начало воспроизведения фиксируется для диагностики", async () => {
+  resetAll();
+  request.downloadResult = { result: { token: "download-report" } };
+  request.completeResult = { result: { uri: "internal://files/reply.wav" } };
+  speak("speech-report", () => {}, (error) => assert.fail(error.message));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const report = lastPlaybackReport();
+  assert.equal(report.started, true);
+  assert.equal(report.volume, 0.6);
 });
 
 test("синхронный отказ загрузки озвучки возвращается как ошибка", async () => {

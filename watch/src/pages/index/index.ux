@@ -447,22 +447,22 @@ export default {
 /* Статус — он же аварийный размыкатель: тап снимает залипшее состояние. */
 .status { color: #7de3ff; font-size: 17px; height: 20px; text-align: center; }
 
-.answer-area { flex-direction: column; align-items: center; width: 100%; height: 118px; margin-top: 4px; }
+.answer-area { flex-direction: column; align-items: center; width: 100%; height: 132px; margin-top: 4px; }
 .heard { color: #6f9fc2; font-size: 15px; lines: 1; text-overflow: ellipsis; text-align: center; width: 100%; }
-.answer { color: #ffffff; font-size: 23px; lines: 3; text-overflow: ellipsis; text-align: center; width: 100%; margin-top: 4px; }
-.read-more { color: #70d7ef; font-size: 14px; margin-top: 4px; }
+.answer { color: #ffffff; font-size: 27px; lines: 3; text-overflow: ellipsis; text-align: center; width: 100%; margin-top: 4px; }
+.read-more { color: #70d7ef; font-size: 17px; margin-top: 4px; }
 
 /* 200×200 — палец попадает не глядя. Составные селекторы в этой сборке Vela
    не работают, поэтому у занятого состояния отдельный самостоятельный класс,
    а класс биндится целиком. */
 .talk-button {
-  width: 176px; height: 176px; border-radius: 88px;
+  width: 162px; height: 162px; border-radius: 81px;
   background-color: #2b9ec2;
   justify-content: center; align-items: center;
   margin-top: 5px;
 }
 .talk-busy {
-  width: 176px; height: 176px; border-radius: 88px;
+  width: 162px; height: 162px; border-radius: 81px;
   background-color: #1b5f75;
   justify-content: center; align-items: center;
   margin-top: 5px;
