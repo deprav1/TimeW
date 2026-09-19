@@ -108,6 +108,7 @@ const HOME_ACTION_TTL_MS = 30 * 1000;
 const IDEMPOTENCY_PREFIX = "idem:";
 const CONFIRMATION_PREFIX = "confirm:";
 const HOME_ACTION_PREFIX = "home-action:";
+const SPEECH_TEST_PHRASE = "Проверка звука. Часы слышно.";
 const DIAG_KEY = "diag:last";
 const DIAG_KEEP = 5;
 const DIAG_TTL_MS = 24 * 60 * 60 * 1000;
@@ -185,9 +186,14 @@ async function resetIdempotency() { await store.kvClear(IDEMPOTENCY_PREFIX); }
 // Можно ли озвучивать ответы. Часы спрашивают это через /api/v1/status и
 // пишут на экране, если озвучка недоступна: иначе включённая настройка
 // просто молчала бы без объяснений.
+// Считаем так же, как считает synthesizeSpeech, иначе получается расхождение:
+// capabilities.speech сообщает «нет», а POST /api/v1/speak при этом работает —
+// или наоборот, проверка динамика отказывается в рабочей конфигурации.
 function ttsAvailable() {
-  if (config.ttsProvider === "gemini") return Boolean(config.apiKey);
-  return Boolean(config.ttsApiKey && config.ttsProvider === "openai-compatible");
+  const provider = effectiveTtsProvider();
+  if (provider === "gemini") return Boolean(config.apiKey);
+  if (provider !== "openai-compatible") return false;
+  return Boolean(config.ttsApiKey || (config.provider === "openai-compatible" && config.apiKey));
 }
 
 // Тип аудио определяется по самим байтам, а не по тому, что заявили часы.
@@ -1726,6 +1732,19 @@ async function route(req, res) {
   if (req.method === "POST" && pathname === "/api/v1/query") return handleQuery(req, res, url);
   if (req.method === "POST" && pathname === "/api/v1/voice") return handleVoice(req, res, url);
   if (req.method === "POST" && pathname === "/api/v1/speak") return handleSpeak(req, res);
+  // Проверка динамика. Обычная озвучка требует speechId, а тот выдаётся
+  // только вместе с ответом модели — то есть проверить звук нельзя, не
+  // потратив запрос к AI. Фраза тут фиксированная и короткая: текст снаружи
+  // не принимается, иначе ручка стала бы бесплатным синтезом для всех, у кого
+  // есть токен.
+  if (req.method === "GET" && pathname === "/api/v1/speak/test") {
+    if (!ttsAvailable()) return error(res, 503, "Синтез речи не настроен на шлюзе", "tts_unavailable");
+    const requestedFormat = url.searchParams.get("format") || "";
+    const startedAt = Date.now();
+    const speech = await synthesizeSpeech(SPEECH_TEST_PHRASE, requestedFormat);
+    console.log(`tts requestId=speak-test provider=${Date.now() - startedAt} bytes=${speech.audio.length} total=${Date.now() - startedAt}`);
+    return sendAudio(res, speech.audio, speech.contentType);
+  }
   const speechIdMatch = pathname.match(/^\/api\/v1\/speak\/([^/]+)$/);
   if (req.method === "GET" && speechIdMatch) return handleSpeakById(req, res, decodeURIComponent(speechIdMatch[1]));
   // Отчёт диагностики с часов. Единственный способ увидеть, что происходит

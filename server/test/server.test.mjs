@@ -1570,6 +1570,39 @@ test("POST /api/v1/speak with a mock TTS provider streams back audio/mpeg", asyn
   );
 });
 
+// Проверить динамик обычным путём нельзя: speechId выдаётся только вместе с
+// ответом модели. Отдельная ручка синтезирует фиксированную фразу и ничего не
+// принимает снаружи, кроме формата.
+test("GET /api/v1/speak/test synthesizes a fixed phrase and takes no text from the caller", async (t) => {
+  const originalFormat = config.ttsFormat;
+  config.ttsFormat = "mp3";
+  t.after(() => { config.ttsFormat = originalFormat; });
+  const fakeAudio = Buffer.from([0xff, 0xfb, 0x90, 0x00, 9, 9]);
+  let sentText = "";
+  await withMockOpenAI(
+    async (req, res) => {
+      sentText = (await readJsonBody(req)).input || "";
+      res.writeHead(200, { "Content-Type": "audio/mpeg" });
+      res.end(fakeAudio);
+    },
+    async () => {
+      const res = await fetch(`${base}/api/v1/speak/test?format=mp3&text=что-угодно`);
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get("content-type"), "audio/mpeg");
+      assert.equal(Buffer.compare(Buffer.from(await res.arrayBuffer()), fakeAudio), 0);
+      assert.match(sentText, /Проверка звука/);
+      assert.doesNotMatch(sentText, /что-угодно/, "текст из запроса не должен попадать в синтез");
+    }
+  );
+});
+
+test("GET /api/v1/speak/test says so plainly when synthesis is not configured", async () => {
+  const res = await fetch(`${base}/api/v1/speak/test`);
+  assert.equal(res.status, 503);
+  const body = await res.json();
+  assert.equal(body.error.code, "tts_unavailable");
+});
+
 test("OpenAI-compatible TTS honours a safe format override and reports the wire format", async (t) => {
   const originalFormat = config.ttsFormat;
   config.ttsFormat = "mp3";

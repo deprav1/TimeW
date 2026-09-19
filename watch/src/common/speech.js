@@ -210,6 +210,74 @@ function download(speechId, done, fail) {
   }
 }
 
+// Проверка динамика без траты запроса к модели: шлюз синтезирует свою
+// фиксированную фразу. Возвращает наверх подробности для отчёта, а не только
+// «получилось / не получилось».
+export function speakTest(done, fail) {
+  var startedAt = Date.now()
+  mediaVolume(function(value) {
+    lastPlayback = { started: false, error: "", volume: value }
+    var url = baseUrl() + "/api/v1/speak/test?format=" +
+      (getRecordingSettings().ttsFormat === "mp3" ? "mp3" : "wav")
+    var headers = {}
+    var token = getCached().deviceToken
+    if (token) headers["X-TimeW-Device-Token"] = token
+    var settle = guard(UPLOAD_TIMEOUT_MS, function() {
+      fail({ message: "Проверка звука не ответила", volume: value, ms: Date.now() - startedAt })
+    })
+    try {
+      request.download({
+        url: url,
+        header: headers,
+        success: settle(function(data) {
+          var downloadToken = data && (data.token || data)
+          if (!downloadToken) {
+            fail({ message: "Шлюз не отдал файл проверки", volume: value, ms: Date.now() - startedAt })
+            return
+          }
+          var settleComplete = guard(UPLOAD_TIMEOUT_MS, function() {
+            fail({ message: "Файл проверки не пришёл", volume: value, ms: Date.now() - startedAt })
+          })
+          try {
+            request.onDownloadComplete({
+              token: downloadToken,
+              success: settleComplete(function(result) {
+                var uri = result && (result.uri || result)
+                var downloadedMs = Date.now() - startedAt
+                if (!uri) {
+                  fail({ message: "Файл проверки не найден", volume: value, ms: downloadedMs })
+                  return
+                }
+                play(uri, function() {
+                  done({ volume: value, uri: uri, downloadedMs: downloadedMs, ms: Date.now() - startedAt,
+                    started: lastPlayback.started })
+                }, function(error) {
+                  fail({ message: (error && error.message) || "не проигралось", volume: value,
+                    uri: uri, downloadedMs: downloadedMs, ms: Date.now() - startedAt })
+                })
+              }),
+              fail: settleComplete(function(error, code) {
+                fail({ message: messageForStatus(code), code: code, volume: value, ms: Date.now() - startedAt })
+              })
+            })
+          } catch (error) {
+            settleComplete(function() {
+              fail({ message: "Не удалось получить файл проверки", volume: value, ms: Date.now() - startedAt })
+            })()
+          }
+        }),
+        fail: settle(function(error, code) {
+          fail({ message: messageForStatus(code), code: code, volume: value, ms: Date.now() - startedAt })
+        })
+      })
+    } catch (error) {
+      settle(function() {
+        fail({ message: "Не удалось начать проверку звука", volume: value, ms: Date.now() - startedAt })
+      })()
+    }
+  })
+}
+
 export function stopSpeaking() {
   try {
     if (typeof audio.stop === "function") audio.stop()

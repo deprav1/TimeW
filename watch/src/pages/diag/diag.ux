@@ -41,9 +41,9 @@ import file from "@system.file"
 import volume from "@system.volume"
 import { loadSettings, getCached } from "../../common/settings"
 import { networkType } from "../../common/net"
-import { sendDiagnostics } from "../../common/api"
+import { sendDiagnostics, lastVoiceStats } from "../../common/api"
 import { recordAudio, recordingCapability } from "../../common/audio"
-import { mediaVolume, lastPlaybackReport } from "../../common/speech"
+import { mediaVolume, lastPlaybackReport, speakTest } from "../../common/speech"
 import { CONFIG_STAMP } from "../../common/config"
 import { VERSION_CODE } from "../../common/build-info"
 
@@ -224,18 +224,36 @@ export default {
     var self = this
     if (self.cancelled) return
     self.progressText = "проверяю звук"
-    mediaVolume(function(value) {
+    // Прошлый вариант только пересказывал последнее воспроизведение, а его
+    // могло не быть вовсе — в отчёте это выглядело как «ничего не известно».
+    // Теперь звук проверяется по-настоящему: шлюз синтезирует свою короткую
+    // фразу, часы её скачивают и проигрывают.
+    speakTest(function(result) {
       if (self.cancelled) return
-      report.mediaVolume = value
-      var playback = lastPlaybackReport()
-      report.playback = playback
-      self.add("громкость", value < 0 ? "модуль недоступен" :
-        value < 0.05 ? "в нуле — озвучку не слышно" : Math.round(value * 100) + "%")
-      if (playback.started || playback.error) {
-        self.add("озвучка", playback.started ? "последняя дошла до проигрывания" : "последняя не дошла: " + playback.error)
+      report.mediaVolume = result.volume
+      report.speechTest = { ok: true, downloadedMs: result.downloadedMs, totalMs: result.ms, started: result.started }
+      report.playback = lastPlaybackReport()
+      self.add("громкость", self.volumeText(result.volume))
+      self.add("звук", "проиграно за " + result.ms + " мс (загрузка " + result.downloadedMs + " мс)")
+      next()
+    }, function(error) {
+      if (self.cancelled) return
+      report.mediaVolume = error.volume
+      report.speechTest = {
+        ok: false, message: error.message, code: error.code || null,
+        downloadedMs: error.downloadedMs || null, totalMs: error.ms || null
       }
+      report.playback = lastPlaybackReport()
+      self.add("громкость", self.volumeText(error.volume))
+      self.add("звук", "не удалось: " + error.message)
       next()
     })
+  },
+
+  volumeText(value) {
+    if (value === undefined || value === null || value < 0) return "модуль недоступен"
+    if (value < 0.05) return "в нуле — озвучку не слышно"
+    return Math.round(value * 100) + "%"
   },
 
   probeRecording(report) {
@@ -283,13 +301,20 @@ export default {
           self.finish(report)
         },
         fail: function() {
+          report.recordError = { message: "файл записи не прочитался", uri: audio.uri, code: null }
           self.add("запись", "файл не прочитался: " + audio.uri)
           self.finish(report)
         }
       })
     }, function(error) {
       report.capture = recordingCapability().last
-      self.add("запись", "не удалась: " + ((error && error.message) || "ошибка"))
+      // Без этого в отчёте оставалась только пустота на месте записи: причина
+      // жила лишь строкой на экране и до шлюза не доезжала.
+      report.recordError = {
+        message: (error && error.message) || "ошибка",
+        code: (error && error.code) || null
+      }
+      self.add("запись", "не удалась: " + report.recordError.message)
       self.finish(report)
     })
   },
@@ -332,6 +357,16 @@ export default {
 
   finish(report) {
     if (this.cancelled) return
+    // Этапы последнего голосового запроса: часы знают общее время, шлюз —
+    // сколько из него ушло на провайдера. Без этой пары «долго думает»
+    // неотличимо от «медленный канал».
+    var voice = lastVoiceStats()
+    if (voice.at) {
+      report.lastVoice = voice
+      this.add("последний запрос", voice.totalMs + " мс всего" +
+        (voice.timings ? ", провайдер " + voice.timings.providerMs + " мс, шлюз " + voice.timings.totalMs + " мс" : "") +
+        (voice.error ? ", ошибка: " + voice.error : ""))
+    }
     this.busy = false
     this.showCancel = false
     this.runClass = "run-button"

@@ -53,6 +53,11 @@ function texts(notes) {
 }
 
 export default {
+  // Параметр маршрута: главный экран открывает заметки сразу «в диктовку».
+  protected: {
+    autoDictate: ""
+  },
+
   private: {
     notes: [],
     hasNotes: false,
@@ -80,6 +85,13 @@ export default {
           if (!getCached().gatewayUrl || !getCached().deviceToken) {
             self.errorText = "Сначала настройте шлюз"
             return
+          }
+          // Кнопка «Заметка» на главном экране означает «хочу продиктовать
+          // заметку», а не «покажи список». Раньше она просто открывала экран,
+          // и надиктовать можно было только вторым нажатием — здесь.
+          if (self.autoDictate && !self.busy) {
+            self.autoDictate = ""
+            self.dictate()
           }
           var now = Date.now()
           if (self.lastRefreshAt && now - self.lastRefreshAt < 30000) return

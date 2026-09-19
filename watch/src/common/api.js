@@ -26,6 +26,34 @@ function uploadTimeout() {
   return getRecordingSettings().uploadTimeoutMs || UPLOAD_TIMEOUT_MS
 }
 
+// Последний голосовой запрос: сколько заняло целиком на часах и что шлюз
+// сообщил о своих этапах. «Долго думает» без этих чисел неотличимо от
+// «медленный провайдер», «медленная отправка» и «медленный канал».
+var lastVoice = { at: 0, totalMs: 0, transport: "", bytes: 0, timings: null, requestId: "", error: "" }
+
+export function lastVoiceStats() {
+  return {
+    at: lastVoice.at, totalMs: lastVoice.totalMs, transport: lastVoice.transport,
+    bytes: lastVoice.bytes, timings: lastVoice.timings, requestId: lastVoice.requestId,
+    error: lastVoice.error
+  }
+}
+
+function beginVoice(transport, bytes) {
+  lastVoice = { at: Date.now(), totalMs: 0, transport: transport, bytes: bytes || 0,
+    timings: null, requestId: "", error: "" }
+  return lastVoice.at
+}
+
+function endVoice(startedAt, response, error) {
+  lastVoice.totalMs = Date.now() - startedAt
+  if (response) {
+    lastVoice.timings = response.timings || null
+    lastVoice.requestId = response.requestId || ""
+  }
+  if (error) lastVoice.error = (error && error.message) || "ошибка"
+}
+
 var requestCounter = 0
 function makeRequestKey(kind) {
   requestCounter += 1
@@ -326,7 +354,11 @@ function sendAudioBytes(path, audio, contentType, intent, requestKey, preview, r
 export function voiceBytes(bytes, contentType, intent, done, fail, options) {
   var requestKey = (options && options.requestKey) || makeRequestKey("voice")
   var preview = !options || options.preview !== false
-  sendAudioBytes("/api/v1/voice", bytes, contentType, intent, requestKey, preview, options && options.recordedMs, done, fail)
+  var size = bytes && (bytes.byteLength || bytes.length) || 0
+  var startedAt = beginVoice("bytes", size)
+  sendAudioBytes("/api/v1/voice", bytes, contentType, intent, requestKey, preview, options && options.recordedMs,
+    function(response) { endVoice(startedAt, response, null); done(response) },
+    function(error) { endVoice(startedAt, null, error); fail(error) })
 }
 
 export function voiceUri(uri, contentType, intent, done, fail, options) {
@@ -336,6 +368,7 @@ export function voiceUri(uri, contentType, intent, done, fail, options) {
   }
   var requestKey = (options && options.requestKey) || makeRequestKey("voice")
   var preview = !options || options.preview !== false
+  var startedAt = beginVoice("uri", 0)
 
   // Способы доставки записи, доступные на этой прошивке. request.upload на
   // Watch S5 отсутствует (проверено опросом рантайма), и раньше он всё равно
@@ -356,8 +389,11 @@ export function voiceUri(uri, contentType, intent, done, fail, options) {
     var mode = order[index]
     senders[mode]("/api/v1/voice", uri, contentType, intent, requestKey, preview, options && options.recordedMs, function(response) {
       rememberTransferMode(mode)
+      lastVoice.transport = mode
+      endVoice(startedAt, response, null)
       done(response, mode)
     }, function(error) {
+      endVoice(startedAt, null, error)
       // Preserve the idempotency key across an offline defer. If the gateway
       // committed the note but the response was lost, retrying with a new key
       // would create a duplicate note.

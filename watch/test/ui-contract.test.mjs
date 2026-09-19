@@ -43,6 +43,26 @@ test("main screen does not refetch status on every screen wake", async () => {
   assert.ok(throttle < fetchCall, "fetchStatus должен стоять после проверки lastSyncAt")
 })
 
+// Кнопка «Заметка» рядом с «Дом» должна вести себя так же — начинать запись,
+// а не молча открывать список и ждать второго нажатия.
+test("the Note button starts dictation instead of only opening the list", async () => {
+  const index = await page("index")
+  assert.match(index, /autoDictate:\s*"1"/)
+  const notes = await page("notes")
+  assert.match(notes, /autoDictate/)
+  assert.match(notes, /self\.dictate\(\)/)
+})
+
+// Отчёт диагностики — единственный канал с устройства, и молчать об отказах
+// он не должен.
+test("diagnostics report carries failures, not only successes", async () => {
+  const source = await page("diag")
+  assert.match(source, /report\.recordError/)
+  assert.match(source, /report\.speechTest/)
+  assert.match(source, /report\.lastVoice/)
+  assert.match(source, /speakTest\(/)
+})
+
 test("answer screen never exposes a dead speech control", async () => {
   const source = await page("answer")
   assert.match(source, /if="\{\{canSpeak\}\}"/) 

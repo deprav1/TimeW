@@ -324,9 +324,12 @@ export default {
     this.startVoice("home")
   },
 
+  // «Дом» начинает запись сразу, и «Заметка» рядом обязана вести себя так же.
+  // Прежде она открывала список и молча ждала второго нажатия — выглядело
+  // это как «заметку передать не получается».
   startNote() {
     if (this.busy) return
-    router.push({ uri: "/pages/notes" })
+    router.push({ uri: "/pages/notes", params: { autoDictate: "1" } })
   },
 
   applyResponse(response) {
