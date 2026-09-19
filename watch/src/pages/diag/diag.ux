@@ -9,7 +9,12 @@
       <text class="run-label">{{runLabel}}</text>
     </div>
 
+    <div class="cancel-button" if="{{showCancel}}" onclick="cancelRun">
+      <text class="cancel-label">Остановить проверку</text>
+    </div>
+
     <text class="hint" if="{{sentText}}">{{sentText}}</text>
+    <text class="progress" if="{{progressText}}">{{progressText}}</text>
 
     <!-- Статический list-item без for в этой сборке Vela не рендерится,
          поэтому строки отчёта тоже через for. -->
@@ -64,8 +69,11 @@ export default {
     busy: false,
     hasReport: false,
     sentText: "",
+    progressText: "",
     report: null,
-    tlsResults: []
+    tlsResults: [],
+    cancelled: false,
+    showCancel: false
   },
 
   goBack() {
@@ -82,8 +90,11 @@ export default {
     var self = this
     if (self.busy) return
     self.busy = true
+    self.cancelled = false
+    self.showCancel = true
     self.runClass = "run-busy"
     self.runLabel = "Проверяю…"
+    self.progressText = "готовлю проверку"
     self.lines = []
     self.sentText = ""
     self.hasReport = false
@@ -122,11 +133,23 @@ export default {
     })
   },
 
+  cancelRun() {
+    if (!this.busy) return
+    this.cancelled = true
+    this.showCancel = false
+    this.busy = false
+    this.runClass = "run-button"
+    this.runLabel = "Проверить ещё раз"
+    this.progressText = "проверка остановлена"
+  },
+
   // Проверяем два адреса по очереди: открытый /health и защищённый
   // /api/v1/status. Так видно, что именно не сходится — сеть, адрес или
   // токен. Раньше все три случая выглядели одинаково.
   checkGateway(report) {
     var self = this
+    if (self.cancelled) return
+    self.progressText = "проверяю шлюз"
     var base = getCached().gatewayUrl || ""
     if (!base) {
       self.finish(report)
@@ -134,11 +157,13 @@ export default {
     }
 
     self.timedRequest(base + "/health", null, function(health) {
+      if (self.cancelled) return
       report.steps.push(health)
       self.add("/health", health.status + " за " + health.ms + " мс" + (health.error ? " — " + health.error : ""))
 
       var token = getCached().deviceToken
       self.timedRequest(base + "/api/v1/status", token, function(status) {
+        if (self.cancelled) return
         report.steps.push(status)
         self.add("/status", status.status + " за " + status.ms + " мс" + (status.error ? " — " + status.error : ""))
         if (status.body) {
@@ -163,6 +188,7 @@ export default {
   // именно сертификатом можно спрятать шлюз.
   probeTls(report, index) {
     var self = this
+    if (self.cancelled) return
     var targets = [
       { name: "Google", url: "https://www.google.com/generate_204" },
       { name: "Cloudflare", url: "https://cloudflare.com/cdn-cgi/trace" },
@@ -177,7 +203,9 @@ export default {
     }
     if (index === 0) self.tlsResults = []
     var target = targets[index]
+    self.progressText = "сертификат " + (index + 1) + " из " + targets.length
     self.timedRequest(target.url, null, function(result) {
+      if (self.cancelled) return
       self.tlsResults.push({ name: target.name, status: result.status, ms: result.ms, error: result.error })
       self.add(target.name, (result.status ? "код " + result.status : "не дошёл") + (result.error ? " — " + result.error : ""))
       self.probeTls(report, index + 1)
@@ -189,8 +217,11 @@ export default {
   // application/octet-stream, и запись отклонялась.
   probeRecording(report) {
     var self = this
+    if (self.cancelled) return
+    self.progressText = "проверяю запись"
     self.add("запись", "пробую…")
     recordAudio(function(audio) {
+      if (self.cancelled) return
       if (audio.bytes) {
         var framed = new Uint8Array(audio.bytes)
         var framedHead = ""
@@ -211,6 +242,7 @@ export default {
       file.readArrayBuffer({
         uri: audio.uri,
         success: function(data) {
+          if (self.cancelled) return
           var bytes = data && (data.buffer || data)
           var size = bytes ? (bytes.byteLength || bytes.length || 0) : 0
           var head = ""
@@ -276,9 +308,12 @@ export default {
   },
 
   finish(report) {
+    if (this.cancelled) return
     this.busy = false
+    this.showCancel = false
     this.runClass = "run-button"
     this.runLabel = "Проверить ещё раз"
+    this.progressText = "проверка завершена"
     this.report = report
     this.hasReport = true
   },
@@ -309,6 +344,7 @@ export default {
 .run-label { color: #07111e; font-size: 19px; font-weight: bold; }
 
 .hint { color: #6f80a2; font-size: 13px; margin-top: 6px; text-align: center; width: 100%; lines: 2; text-overflow: ellipsis; }
+.progress { color: #7de3ff; font-size: 15px; margin-top: 6px; text-align: center; width: 100%; lines: 1; text-overflow: ellipsis; }
 
 .lines { flex: 1; width: 100%; margin-top: 8px; }
 .line { margin-top: 4px; padding-left: 10px; padding-right: 10px; }
@@ -317,4 +353,6 @@ export default {
 .action-row { flex-direction: row; justify-content: center; margin-top: 8px; }
 .small-button { width: 190px; height: 40px; border-radius: 13px; background-color: #202b45; justify-content: center; align-items: center; }
 .small-label { color: #d9e6ff; font-size: 15px; }
+.cancel-button { width: 230px; height: 48px; border-radius: 16px; background-color: #24344f; justify-content: center; align-items: center; margin-top: 8px; }
+.cancel-label { color: #d9e6ff; font-size: 16px; }
 </style>
