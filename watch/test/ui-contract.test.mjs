@@ -15,6 +15,8 @@ test("main screen keeps the high-frequency actions large and explicit", async ()
   assert.match(source, /startNote\(\)/)
   assert.match(source, /Отменить действие/)
   assert.match(source, /showCancel/)
+  assert.match(source, /homeAvailable/)
+  assert.match(source, /Дом · нет/)
   assert.doesNotMatch(source, /onclick="unstick"\s*class="status"/)
 })
 
