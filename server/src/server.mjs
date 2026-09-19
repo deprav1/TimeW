@@ -1303,6 +1303,7 @@ async function handleVoice(req, res, reqUrl) {
   const intentField = audio.isMultipart ? extractMultipartField(audio.raw, audio.requestType, "intent") : undefined;
   const intentParam = intentField !== undefined ? intentField : reqUrl.searchParams.get("intent");
   const forceNote = intentParam === "note";
+  const forceHome = intentParam === "home";
   const previewNote = forceNote && reqUrl.searchParams.get("preview") === "1";
   const requestField = audio.isMultipart ? extractMultipartField(audio.raw, audio.requestType, "requestId") : undefined;
   const requestKey = requestId(req, { requestId: requestField, provider: providerParam || "auto", intent: intentParam || "", audio: audio.bytes.toString("base64") });
@@ -1348,6 +1349,12 @@ async function handleVoice(req, res, reqUrl) {
       const response = { ok: true, kind: "draft", transcript, text: "Проверьте распознанную заметку", source: "gemini" };
       return finish(response);
     }
+    if (forceHome) {
+      const command = parseHomeCommand(transcript);
+      if (!command) return finish({ ok: true, kind: "home", executed: false, requiresConfirmation: false, transcript, text: "Назовите действие и комнату для света" });
+      const result = await buildHomeCommandResult(command, metrics, requestKey);
+      return finish({ ...result, transcript });
+    }
     const note = forceNote ? normalizeText(transcript) : parseNote(transcript);
     if (note) {
       const result = await buildNoteResult(note);
@@ -1376,6 +1383,12 @@ async function handleVoice(req, res, reqUrl) {
   if (previewNote) {
     const response = { ok: true, kind: "draft", transcript, text: "Проверьте распознанную заметку", source: transcribed.source };
     return finish(response);
+  }
+  if (forceHome) {
+    const command = parseHomeCommand(transcript);
+    if (!command) return finish({ ok: true, kind: "home", executed: false, requiresConfirmation: false, transcript, text: "Назовите действие и комнату для света" });
+    const result = await buildHomeCommandResult(command, metrics, requestKey);
+    return finish({ ...result, transcript });
   }
   const note = forceNote ? normalizeText(transcript) : parseNote(transcript);
   if (note) {

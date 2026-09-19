@@ -19,11 +19,11 @@
     <!-- Статический list-item без for в этой сборке Vela не рендерится,
          поэтому список только через for. -->
     <list class="notes-list">
-      <list-item for="{{notes}}" class="note-item" type="note" onlongpress="askDelete($item.id)">
+      <list-item for="{{notes}}" class="note-item" type="note" onclick="openNote($item.id)">
         <text class="note-text">{{ $item.text }}</text>
       </list-item>
     </list>
-    <text class="hint" if="{{hasNotes}}">удерживайте, чтобы удалить</text>
+    <text class="hint" if="{{hasNotes}}">нажмите, чтобы прочитать</text>
   </div>
 </template>
 
@@ -43,7 +43,7 @@ function messageFrom(error) {
 
 function texts(notes) {
   return (notes || []).map(function(note) {
-    return { id: note.id, text: note.text }
+    return { id: note.id, text: note.text, createdAt: note.createdAt || "" }
   })
 }
 
@@ -117,6 +117,23 @@ export default {
 
   goBack() {
     router.back()
+  },
+
+  openNote(id) {
+    var self = this
+    var note = null
+    for (var i = 0; i < self.notes.length; i++) {
+      if (self.notes[i].id === id) { note = self.notes[i]; break }
+    }
+    if (!note) return
+    prompt.showDialog({
+      title: note.createdAt ? String(note.createdAt).slice(0, 16).replace("T", " ") : "Заметка",
+      message: note.text,
+      buttons: [{ text: "Закрыть" }, { text: "Удалить" }],
+      success: function(data) {
+        if (data && data.index === 1) self.askDelete(id)
+      }
+    })
   },
 
   dictate() {

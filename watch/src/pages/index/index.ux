@@ -6,7 +6,7 @@
        Проверено фотографией с устройства: текст, начинавшийся у левого
        края, срезало — «Личный помощник» превращался в «ичный помощник». -->
   <div class="page">
-    <text class="status" onclick="unstick">{{status}}</text>
+    <text class="status">{{status}}</text>
 
     <!-- Область ответа — тоже цель для пальца: когда ответа ещё нет, тап по
          ней начинает разговор. На часах промахнуться мимо кнопки легко, а
@@ -14,6 +14,7 @@
     <div class="answer-area" onclick="tapAnswer">
       <text class="heard" if="{{transcript}}">{{transcript}}</text>
       <text class="answer">{{result}}</text>
+      <text class="read-more" if="{{hasAnswer}}" onclick="openAnswer">читать полностью →</text>
     </div>
 
     <!-- Одна большая круглая цель: на часах палец закрывает пол-экрана,
@@ -22,11 +23,20 @@
       <text class="talk-label">{{talkLabel}}</text>
     </div>
 
+    <div class="quick-row" if="{{showQuick}}">
+      <div class="quick-button home-button" onclick="startHome"><text class="quick-label">Дом</text></div>
+      <div class="quick-button note-button" onclick="startNote"><text class="quick-label">Заметка</text></div>
+    </div>
+    <div class="quick-row" if="{{undoToken}}">
+      <div class="quick-button undo-button" onclick="undoLast"><text class="quick-label">Отменить действие</text></div>
+    </div>
+
+    <div class="cancel-button" if="{{showCancel}}" onclick="unstick"><text class="cancel-label">Отменить</text></div>
+
     <text class="error" if="{{errorText}}">{{errorText}}</text>
 
     <div class="bottom-row">
       <text class="link" onclick="openNotes">заметки</text>
-      <text class="link" if="{{undoToken}}" onclick="undoLast">отменить</text>
       <text class="link" if="{{hasAnswer}}" onclick="resetDialogue">заново</text>
       <text class="link" onclick="openSettings">настр.</text>
     </div>
@@ -67,7 +77,9 @@ export default {
     settingsReady: false,
     lastSyncAt: 0,
     undoToken: "",
-    undoTimer: 0
+    undoTimer: 0,
+    showQuick: true,
+    showCancel: false
   },
 
   onShow() {
@@ -116,6 +128,8 @@ export default {
   setBusy(value) {
     this.busy = value
     this.talkClass = value ? "talk-busy" : "talk-button"
+    this.showCancel = value
+    this.showQuick = !value && !this.undoToken
   },
 
   // Системному диалогу таймаут не поставишь — человек думает сколько угодно.
@@ -280,6 +294,16 @@ export default {
     })
   },
 
+  startHome() {
+    if (this.busy) return
+    this.startVoice("home")
+  },
+
+  startNote() {
+    if (this.busy) return
+    router.push({ uri: "/pages/notes" })
+  },
+
   applyResponse(response) {
     this.status = "готов"
     this.result = response.text || "Готово"
@@ -299,11 +323,13 @@ export default {
   setUndo(token) {
     if (this.undoTimer) clearTimeout(this.undoTimer)
     this.undoToken = token || ""
+    this.showQuick = !this.busy && !this.undoToken
     if (!this.undoToken) return
     var self = this
     this.undoTimer = setTimeout(function() {
       self.undoToken = ""
       self.undoTimer = 0
+      self.showQuick = !self.busy
     }, 30000)
   },
 
@@ -389,35 +415,45 @@ export default {
   background-color: #0b1020;
   padding-left: 40px;
   padding-right: 40px;
-  padding-top: 26px;
-  padding-bottom: 20px;
+  padding-top: 20px;
+  padding-bottom: 14px;
 }
 
 /* Статус — он же аварийный размыкатель: тап снимает залипшее состояние. */
 .status { color: #7de3ff; font-size: 17px; height: 20px; text-align: center; }
 
-.answer-area { flex-direction: column; align-items: center; width: 100%; height: 132px; margin-top: 4px; }
+.answer-area { flex-direction: column; align-items: center; width: 100%; height: 118px; margin-top: 4px; }
 .heard { color: #6f9fc2; font-size: 15px; lines: 1; text-overflow: ellipsis; text-align: center; width: 100%; }
-.answer { color: #ffffff; font-size: 24px; lines: 4; text-overflow: ellipsis; text-align: center; width: 100%; margin-top: 4px; }
+.answer { color: #ffffff; font-size: 23px; lines: 3; text-overflow: ellipsis; text-align: center; width: 100%; margin-top: 4px; }
+.read-more { color: #70d7ef; font-size: 14px; margin-top: 4px; }
 
 /* 200×200 — палец попадает не глядя. Составные селекторы в этой сборке Vela
    не работают, поэтому у занятого состояния отдельный самостоятельный класс,
    а класс биндится целиком. */
 .talk-button {
-  width: 200px; height: 200px; border-radius: 100px;
+  width: 176px; height: 176px; border-radius: 88px;
   background-color: #2b9ec2;
   justify-content: center; align-items: center;
-  margin-top: 6px;
+  margin-top: 5px;
 }
 .talk-busy {
-  width: 200px; height: 200px; border-radius: 100px;
+  width: 176px; height: 176px; border-radius: 88px;
   background-color: #1b5f75;
   justify-content: center; align-items: center;
-  margin-top: 6px;
+  margin-top: 5px;
 }
 .talk-label { color: #07111e; font-size: 25px; font-weight: bold; text-align: center; }
 
-.error { color: #ff8f8f; font-size: 14px; margin-top: 6px; lines: 2; text-align: center; width: 100%; text-overflow: ellipsis; }
+.quick-row { flex-direction: row; justify-content: center; align-items: center; height: 48px; margin-top: 7px; }
+.quick-button { width: 118px; height: 44px; border-radius: 15px; justify-content: center; align-items: center; margin-left: 5px; margin-right: 5px; }
+.home-button { background-color: #d59b58; }
+.note-button { background-color: #355273; }
+.undo-button { width: 246px; background-color: #b85e66; }
+.quick-label { color: #07111e; font-size: 17px; font-weight: bold; text-align: center; }
+.cancel-button { width: 180px; height: 40px; border-radius: 14px; background-color: #24344f; justify-content: center; align-items: center; margin-top: 7px; }
+.cancel-label { color: #d9e6ff; font-size: 16px; }
+
+.error { color: #ff8f8f; font-size: 14px; margin-top: 5px; lines: 1; text-align: center; width: 100%; text-overflow: ellipsis; }
 
 /* Нижний ряд стоит там, где круг уже сузился примерно до 265px, поэтому
    подписи короткие и с запасом по краям. */

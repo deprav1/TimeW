@@ -13,16 +13,6 @@
          prompt.show, ни элемента input (проверено опросом рантайма).
          Поэтому они приходят из сборки (npm run setup),
          а здесь только показываются — чтобы видеть, куда стучится приложение. -->
-    <div class="row">
-      <text class="row-label">Шлюз</text>
-      <text class="row-value">{{gatewayUrl}}</text>
-    </div>
-
-    <div class="row">
-      <text class="row-label">Токен</text>
-      <text class="row-value">{{tokenDisplay}}</text>
-    </div>
-
     <!-- Тип сети решает вопрос архитектуры: если при выключенном Wi-Fi тут
          «через телефон» и «Проверить связь» проходит, часам достаточно
          телефона в кармане и шлюза в сети. -->
@@ -49,11 +39,11 @@
       <text class="row-value">проверить всё →</text>
     </div>
 
-    <text class="note-line">Сборка {{versionCode}} · адрес и токен из неё</text>
+    <text class="note-line">Сборка {{versionCode}} · параметры сохраняются сразу</text>
 
     <div class="action-row">
       <div class="small-button" onclick="checkConnection"><text class="small-label">Проверить связь</text></div>
-      <div class="small-button save-button" onclick="save"><text class="small-label">Сохранить</text></div>
+      <div class="small-button save-button" onclick="goBack"><text class="small-label">Готово</text></div>
     </div>
   </div>
 </template>
@@ -160,6 +150,7 @@ export default {
   toggleSpeak() {
     this.speakAnswers = !this.speakAnswers
     this.speakDisplay = labelForSpeak(this.speakAnswers)
+    this.persist()
   },
 
   cycleProvider() {
@@ -167,6 +158,7 @@ export default {
     var index = order.indexOf(this.aiProvider)
     this.aiProvider = order[(index + 1) % order.length]
     this.providerDisplay = labelForProvider(this.aiProvider)
+    this.persist()
   },
 
   // Проверка отвечает на три вопроса сразу, потому что по отдельности они
@@ -262,7 +254,7 @@ export default {
     }
   },
 
-  save() {
+  persist() {
     var self = this
     if (!isValidUrl(self.gatewayUrl)) {
       self.errorText = "Адрес должен начинаться с http:// или https://"
@@ -275,7 +267,7 @@ export default {
       speakAnswers: self.speakAnswers,
       aiProvider: self.aiProvider
     }, function() {
-      router.back()
+      self.checkResult = "сохранено"
     }, function(error) {
       self.errorText = messageFrom(error)
     })

@@ -1095,6 +1095,20 @@ test("POST /api/v1/voice with a raw body in demo mode returns transcript + AI te
   assert.equal(body.source, "demo");
 });
 
+test("voice home mode never falls through to a generic AI answer", async () => {
+  const res = await fetch(`${base}/api/v1/voice?intent=home`, {
+    method: "POST",
+    headers: { "Content-Type": "audio/ogg", "Idempotency-Key": "home-mode-guard" },
+    body: Buffer.from("OggS demo audio")
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.kind, "home");
+  assert.equal(body.executed, false);
+  assert.equal(body.requiresConfirmation, false);
+  assert.match(body.text, /действие и комнату/);
+});
+
 test("POST /api/v1/voice accepts a multipart/form-data body (reuses the same parser as /transcribe)", async () => {
   const boundary = "VoiceBoundaryABC";
   const requestBody = buildMultipartBody(boundary, [
