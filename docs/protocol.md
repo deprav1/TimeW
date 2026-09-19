@@ -51,7 +51,7 @@ Access-Control-Max-Age: 86400
 эффективный режим и флаги возможностей без ключей и других секретов:
 
 ```json
-{"ok":true,"service":"timew-gateway","mode":"demo","provider":"mock","buildId":"local","configRevision":"voice-1","runtime":{"maxRecordingMs":10000,"silenceThreshold":450,"silenceDurationMs":1000,"speechGraceMs":900,"frameSize":2048,"requestTimeoutMs":35000,"uploadTimeoutMs":60000,"ttsFormat":"mp3","autoStop":true,"capabilities":{"frameRecording":"probe","immediateLight":false,"undoLight":false}},"capabilities":{"ai":false,"notes":true,"speech":false,"home":false,"homeConfirmation":false,"immediateLight":false,"undoLight":false,"autoStop":true}}
+{"ok":true,"service":"timew-gateway","mode":"demo","provider":"mock","buildId":"local","configRevision":"voice-1","runtime":{"revision":"voice-1","maxRecordingMs":10000,"silenceThreshold":450,"silenceDurationMs":1000,"speechGraceMs":900,"frameSize":2048,"requestTimeoutMs":35000,"uploadTimeoutMs":60000,"ttsFormat":"mp3","autoStop":true,"capabilities":{"frameRecording":"probe","immediateLight":false,"undoLight":false}},"capabilities":{"ai":false,"notes":true,"speech":false,"home":false,"homeConfirmation":false,"immediateLight":false,"undoLight":false,"autoStop":true}}
 ```
 
 ## Текстовый запрос

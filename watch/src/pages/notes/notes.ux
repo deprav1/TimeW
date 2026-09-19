@@ -206,8 +206,11 @@ export default {
     enqueueAudio(audio.uri, audio.contentType, function() {
       self.queuedCount = getQueued().length
       self.errorText = "Нет связи — отправлю, когда появится сеть"
-    }, function() {
-      self.errorText = messageFrom(error)
+    }, function(queueError) {
+      // Отложить не удалось — значит запись потеряна, и причина именно в
+      // часах, а не в сети. Показываем ошибку очереди, иначе человек чинил бы
+      // связь вместо места на устройстве.
+      self.errorText = messageFrom(queueError || error)
     }, error && error.requestKey, audio.bytes)
   },
 

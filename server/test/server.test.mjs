@@ -1,6 +1,6 @@
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, readdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
@@ -19,6 +19,12 @@ delete process.env.DEVICE_TOKEN;
 // must never make real network calls to an AI provider.
 process.env.AI_PROVIDER = "mock";
 process.env.AI_API_KEY = "";
+// Same reason, and one more: without pinning these, server/.env leaks in and
+// runtime.ttsFormat becomes whatever the developer happens to have configured.
+// The suite must describe one deployment, not the machine it runs on.
+process.env.TTS_PROVIDER = "";
+process.env.TTS_API_KEY = "";
+process.env.TTS_FORMAT = "";
 // Keep the shared instance's rate limiter effectively unlimited so the many
 // requests fired across this whole suite never trip 429s; the dedicated
 // rate-limit test below temporarily lowers config.rateLimitMax instead of
@@ -154,6 +160,24 @@ test("GET /api/v1/status is protected and reports capabilities without secrets",
     assert.ok(body.runtime.revision);
     assert.equal("apiKey" in body, false);
   } finally { config.token = original; }
+});
+
+// The status payload is the watch's whole configuration surface, and
+// docs/protocol.md is what other clients are written against. That example
+// drifted from the code three fields at a time before this test existed, so
+// compare it literally instead of describing it.
+test("the /api/v1/status example in docs/protocol.md matches the real payload", async () => {
+  const protocolPath = new URL("../../docs/protocol.md", import.meta.url);
+  const markdown = await readFile(protocolPath, "utf8");
+  const line = markdown.split("\n").find((row) => row.includes('"service":"timew-gateway"') && row.includes('"runtime"'));
+  assert.ok(line, "в docs/protocol.md нет примера ответа /api/v1/status");
+  const documented = JSON.parse(line);
+
+  const res = await fetch(`${base}/api/v1/status`);
+  assert.equal(res.status, 200);
+  const actual = await res.json();
+  // buildId is deployment-specific; the doc shows the local default.
+  assert.deepEqual({ ...actual, buildId: documented.buildId }, documented);
 });
 
 test("query idempotency key returns the original note and does not duplicate it", async () => {

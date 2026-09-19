@@ -28,10 +28,25 @@ function errorFrom(data, code, fallback) {
   return error
 }
 
+// `in` only proves the runtime declares the slot, not that it ever fills it.
+// Firmware that exposes `onframerecorded` and still delivers the recording
+// through success() exists, so the property is a precondition, never a
+// guarantee — see framedProven below.
 function hasFrameEvents() {
   try {
     return !!record && "onframerecorded" in record
   } catch (error) { return false }
+}
+
+// Set once a capture ends with zero frames: the slot is declared but dead on
+// this firmware. Remembering it for the rest of the session means at most one
+// recording pays the detour. Deliberately not persisted — a module flag has no
+// storage-schema blast radius, and relearning costs one capture per launch.
+var framedUnsupported = false
+
+function uriFrom(data) {
+  var uri = data && (data.uri || data.path || data)
+  return typeof uri === "string" && uri ? uri : ""
 }
 
 function contentTypeFor(uri, format) {
@@ -167,23 +182,41 @@ function startFramed(settings, done, fail) {
   var stopping = false
   var finished = false
   var cancelled = false
+  var captured = null
   lastReport = {
     mode: "pcm-auto-stop", frameEventAvailable: true, frameCount: 0,
     frameBytes: [], signalMetrics: true, stoppedBySilence: false
   }
 
-  function finishOk() {
+  // A capture can end three ways and firmware disagrees about which one it
+  // uses: a last frame, complete(), or plain success(uri). All three funnel
+  // here, and whichever arrives first wins. The uri that success() carries is
+  // never thrown away — on firmware that declares onframerecorded but never
+  // emits a frame it IS the recording, and discarding it used to leave the
+  // screen counting until the watchdog fired and then silently re-record.
+  function finishOk(data) {
     if (finished || cancelled) return
     finished = true
+    if (settle.cancel) settle.cancel()
     active = null
     try { record.onframerecorded = null } catch (error) {}
-    if (!frames.length) {
-      lastReport.mode = "file-opus-fallback"
-      startFile(settings, done, fail, false, lastReport)
+    if (frames.length) {
+      done({ bytes: pcmFramesToWav(frames, 16000), contentType: "audio/wav",
+        recordedMs: Date.now() - startedAt, capture: lastReport })
       return
     }
-    done({ bytes: pcmFramesToWav(frames, 16000), contentType: "audio/wav",
-      recordedMs: Date.now() - startedAt, capture: lastReport })
+    framedUnsupported = true
+    var uri = uriFrom(data) || uriFrom(captured)
+    if (uri) {
+      lastReport.mode = "pcm-no-frames-file"
+      done({ uri: uri, contentType: contentTypeFor(uri, ""),
+        recordedMs: Date.now() - startedAt, capture: lastReport })
+      return
+    }
+    // Nothing captured and no file handed back: the only remaining option is
+    // to record again on the proven Opus path.
+    lastReport.mode = "file-opus-fallback"
+    startFile(settings, done, fail, false, lastReport)
   }
 
   var settle = guard(Math.max(RECORD_TIMEOUT_MS, settings.maxRecordingMs + 8000), function() {
@@ -232,10 +265,16 @@ function startFramed(settings, done, fail) {
       encodeBitRate: 256000,
       frameSize: settings.frameSize,
       format: "pcm",
-      success: function() {},
+      // Recorded outside the guard as well: complete() may win the race with
+      // success(), and the uri must survive that order too.
+      success: function(data) {
+        captured = data
+        settle(finishOk)(data)
+      },
       complete: settle(finishOk),
       fail: settle(function(data, code) {
         active = null
+        framedUnsupported = true
         try { record.onframerecorded = null } catch (error) {}
         var captureError = errorFrom(data, code, "Автостоп записи недоступен")
         if (captureError.code === 202) {
@@ -269,12 +308,21 @@ export function cancelRecording() {
 }
 
 export function recordingCapability() {
-  return { frameEventAvailable: hasFrameEvents(), last: lastReport }
+  return {
+    frameEventAvailable: hasFrameEvents(),
+    framedUnsupported: framedUnsupported,
+    last: lastReport
+  }
+}
+
+// Only for tests: the learned flag is per-session on the device.
+export function resetFrameSupport() {
+  framedUnsupported = false
 }
 
 export function recordAudio(done, fail) {
   var settings = getRecordingSettings()
-  if (settings.autoStop && hasFrameEvents()) {
+  if (settings.autoStop && !framedUnsupported && hasFrameEvents()) {
     startFramed(settings, done, fail)
     return
   }

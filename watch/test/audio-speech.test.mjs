@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { audio, record, request, resetAll } from "../testkit/system.mjs";
 
-const { recordAudio, recordingCapability, cancelRecording } = await import("../src/common/audio.js");
+const { recordAudio, recordingCapability, cancelRecording, resetFrameSupport } = await import("../src/common/audio.js");
 const { speak, stopSpeaking } = await import("../src/common/speech.js");
 const { applyRemoteRuntime } = await import("../src/common/settings.js");
 
@@ -43,8 +43,44 @@ test("явная отмена framed-записи до первого кадра
   assert.equal(recordingCapability().last.mode, "pcm-auto-stop");
 });
 
+// Прошивка объявляет слот onframerecorded, но кадров не шлёт и отдаёт запись
+// обычным success(uri). Такой случай вешал экран на 18 секунд сторожевого
+// таймера, а потом молча включал микрофон второй раз.
+test("прошивка без кадров отвечает сразу и одной записью", async () => {
+  resetAll();
+  resetFrameSupport();
+  record.scripted = { result: { uri: "internal://cache/rec-1.opus" } };
+  const originalStart = record.start;
+  let starts = 0;
+  record.start = (options) => { starts += 1; return originalStart.call(record, options) };
+  const startedAt = Date.now();
+  const result = await new Promise((resolve, reject) => recordAudio(resolve, reject));
+  const elapsed = Date.now() - startedAt;
+  record.start = originalStart;
+  assert.ok(elapsed < 2000, `запись не должна ждать сторожевой таймер, ждали ${elapsed} мс`);
+  assert.equal(starts, 1, "микрофон включается один раз, а не второй раз молча");
+  assert.equal(result.uri, "internal://cache/rec-1.opus");
+  assert.equal(result.capture.mode, "pcm-no-frames-file");
+});
+
+test("после записи без кадров потоковый режим больше не пробуется", async () => {
+  resetAll();
+  resetFrameSupport();
+  record.scripted = { result: { uri: "internal://cache/rec-1.opus" } };
+  await new Promise((resolve, reject) => recordAudio(resolve, reject));
+  assert.equal(recordingCapability().framedUnsupported, true);
+
+  const originalStart = record.start;
+  const formats = [];
+  record.start = (options) => { formats.push(options.format); return originalStart.call(record, options) };
+  await new Promise((resolve, reject) => recordAudio(resolve, reject));
+  record.start = originalStart;
+  assert.deepEqual(formats, ["opus"], "второй заход идёт сразу файловым путём");
+});
+
 test("отчёт сохраняет marker PCM->Opus fallback", async () => {
   resetAll();
+  resetFrameSupport();
   const originalStart = record.start;
   let starts = 0;
   record.start = (options) => {
