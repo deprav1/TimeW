@@ -20,7 +20,10 @@
          поэтому список только через for. -->
     <list class="notes-list">
       <list-item for="{{notes}}" class="note-item" type="note" onclick="openNote($item.id)">
-        <text class="note-text">{{ $item.text }}</text>
+        <div class="note-copy">
+          <text class="note-text">{{ $item.text }}</text>
+          <text class="note-date">{{ $item.createdAt }}</text>
+        </div>
       </list-item>
     </list>
     <text class="hint" if="{{hasNotes}}">нажмите, чтобы прочитать</text>
@@ -43,7 +46,9 @@ function messageFrom(error) {
 
 function texts(notes) {
   return (notes || []).map(function(note) {
-    return { id: note.id, text: note.text, createdAt: note.createdAt || "" }
+    var createdAt = note.createdAt || ""
+    if (createdAt.length >= 16) createdAt = createdAt.slice(0, 16).replace("T", " ")
+    return { id: note.id, text: note.text, createdAt: createdAt }
   })
 }
 
@@ -288,5 +293,7 @@ export default {
 
 .notes-list { flex: 1; width: 100%; margin-top: 8px; }
 .note-item { height: 44px; margin-top: 6px; padding-left: 14px; padding-right: 14px; border-radius: 12px; background-color: #141d33; align-items: center; }
-.note-text { color: #eaf1ff; font-size: 18px; lines: 1; text-overflow: ellipsis; width: 100%; }
+.note-copy { flex-direction: column; width: 100%; }
+.note-text { color: #eaf1ff; font-size: 17px; lines: 1; text-overflow: ellipsis; width: 100%; }
+.note-date { color: #7084a7; font-size: 11px; lines: 1; text-overflow: ellipsis; width: 100%; margin-top: 1px; }
 </style>
