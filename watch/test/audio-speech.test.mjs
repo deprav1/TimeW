@@ -16,6 +16,27 @@ function disableAutoStop() {
   return new Promise((resolve) => applyRemoteRuntime({ autoStop: false }, resolve));
 }
 
+// Фиксированная пауза здесь была источником мигания: добавление ещё одного
+// асинхронного шага в speak() (чтение громкости) сдвигало тайминг, и под
+// нагрузкой 20 мс переставало хватать. Ждём условие, а не время.
+const speechErrors = [];
+
+function resetSpeech() {
+  speechErrors.length = 0;
+}
+
+function finishPlayback() {
+  if (audio.onended) audio.onended();
+}
+
+async function waitFor(condition, what) {
+  for (let i = 0; i < 200; i++) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`не дождались: ${what}`);
+}
+
 test("по умолчанию запись идёт файловым путём, а не потоковым", async () => {
   resetAll();
   resetFrameSupport();
@@ -160,20 +181,25 @@ test("отсутствие модуля громкости не блокируе
   volume.available = false;
   const value = await new Promise((resolve) => mediaVolume(resolve));
   assert.equal(value, -1);
+  resetSpeech();
   request.downloadResult = { result: { token: "download-novol" } };
   request.completeResult = { result: { uri: "internal://files/reply.wav" } };
-  speak("speech-1", () => {}, (error) => assert.fail(error.message));
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(audio.playCalls, 1);
+  speak("speech-1", () => {}, (error) => speechErrors.push(error.message));
+  await waitFor(() => audio.playCalls === 1, "воспроизведение началось");
+  finishPlayback();
+  assert.deepEqual(speechErrors, []);
 });
 
 test("начало воспроизведения фиксируется для диагностики", async () => {
   resetAll();
+  resetSpeech();
   request.downloadResult = { result: { token: "download-report" } };
   request.completeResult = { result: { uri: "internal://files/reply.wav" } };
-  speak("speech-report", () => {}, (error) => assert.fail(error.message));
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  speak("speech-report", () => {}, (error) => speechErrors.push(error.message));
+  await waitFor(() => lastPlaybackReport().started, "воспроизведение отмечено начатым");
   const report = lastPlaybackReport();
+  finishPlayback();
+  assert.deepEqual(speechErrors, []);
   assert.equal(report.started, true);
   assert.equal(report.volume, 0.6);
 });
@@ -198,9 +224,8 @@ test("озвучка остаётся активной до ended и затем 
   request.downloadResult = { result: { token: "download-1" } };
   request.completeResult = { result: { uri: "internal://files/reply.wav" } };
   let finished = false;
-  speak("speech-1", () => { finished = true; }, (error) => assert.fail(error.message));
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(audio.playCalls, 1);
+  speak("speech-1", () => { finished = true; }, (error) => speechErrors.push(error.message));
+  await waitFor(() => audio.playCalls === 1, "воспроизведение началось");
   assert.equal(finished, false, "done не должен срабатывать сразу после audio.play()");
   audio.onended();
   assert.equal(finished, true);
@@ -211,8 +236,8 @@ test("остановка озвучки завершает активное UI-�
   request.downloadResult = { result: { token: "download-1" } };
   request.completeResult = { result: { uri: "internal://files/reply.wav" } };
   let finished = false;
-  speak("speech-1", () => { finished = true; }, (error) => assert.fail(error.message));
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  speak("speech-1", () => { finished = true; }, (error) => speechErrors.push(error.message));
+  await waitFor(() => audio.playCalls === 1, "воспроизведение началось");
   stopSpeaking();
   assert.equal(finished, true);
 });
@@ -222,8 +247,9 @@ test("озвучка читает формат шлюза как hint запро
   await new Promise((resolve) => applyRemoteRuntime({ ttsFormat: "mp3" }, resolve));
   request.downloadResult = { result: { token: "download-format" } };
   request.completeResult = { result: { uri: "internal://files/reply.mp3" } };
-  speak("speech-format", () => {}, (error) => assert.fail(error.message));
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  resetSpeech();
+  speak("speech-format", () => {}, (error) => speechErrors.push(error.message));
+  await waitFor(() => request.downloadCalls.length > 0, "запрос озвучки ушёл");
   assert.match(request.downloadCalls[0].url, /\/api\/v1\/speak\/speech-format\?format=mp3$/);
   stopSpeaking();
 });

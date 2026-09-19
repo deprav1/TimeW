@@ -2,7 +2,9 @@
   "name": "timew-watch",
   "version": "0.2.0",
   "private": true,
-  "engines": { "node": ">=8.10" },
+  "engines": {
+    "node": ">=8.10"
+  },
   "scripts": {
     "pretest": "node scripts/prepare.mjs",
     "test": "node --import ./testkit/register.mjs --test",
@@ -13,7 +15,8 @@
     "postbuild": "node scripts/show-rpk.mjs",
     "prerelease": "node scripts/prepare.mjs --bump",
     "release": "aiot release",
-    "postrelease": "node scripts/show-rpk.mjs"
+    "postrelease": "node scripts/show-rpk.mjs",
+    "release:check": "node scripts/release-check.mjs"
   },
   "devDependencies": {
     "@aiot-toolkit/jsc": "^1.0.3",
