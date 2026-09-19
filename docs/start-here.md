@@ -77,7 +77,7 @@ npm run build
 конце напечатается путь к готовому файлу:
 
 ```
-Готов к установке: ...\watch\dist\com.timew.personal.debug.0.2.0.rpk
+Готов к установке: ...\watch\dist\com.timew.personal.debug.0.3.0.rpk
 ```
 
 ---

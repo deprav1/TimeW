@@ -1637,7 +1637,7 @@ async function route(req, res) {
   }
 
   if (req.method === "GET" && pathname === "/health") {
-    return json(res, 200, { ok: true, service: "timew-gateway", mode: publicMode(), version: "0.2.0", buildId: config.buildId });
+    return json(res, 200, { ok: true, service: "timew-gateway", mode: publicMode(), version: "0.3.0", buildId: config.buildId });
   }
 
   if (!authorized(req)) return error(res, 401, "Invalid device token", "unauthorized");

@@ -42,7 +42,7 @@ Access-Control-Max-Age: 86400
 `GET /health` — без токена.
 
 ```json
-{"ok":true,"service":"timew-gateway","mode":"demo","version":"0.2.0","buildId":"local"}
+{"ok":true,"service":"timew-gateway","mode":"demo","version":"0.3.0","buildId":"local"}
 ```
 
 `mode` — `demo`, когда `AI_PROVIDER=mock` или не задан ключ, иначе `live`.

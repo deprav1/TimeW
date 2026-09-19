@@ -4,10 +4,10 @@
 
 | | |
 | --- | --- |
-| `versionCode` | **50** |
-| `versionName` | 0.2.0 |
+| `versionCode` | **51** |
+| `versionName` | 0.3.0 |
 | Устройство | Xiaomi Watch S5 (`minPlatformVersion` 1000) |
-| Размер RPK | ~75 КБ |
+| Размер RPK | ~77 КБ |
 | Собирается | `npm run build` в `watch/` |
 
 ## Что в этой версии
@@ -49,7 +49,7 @@ cd server && npm run setup
 cd watch && npm install && npm run build
 ```
 
-`prebuild` сам поднимет `versionCode` — вручную его править не надо. Готовый файл: `watch/dist/com.timew.personal.debug.0.2.0.rpk`.
+`prebuild` сам поднимет `versionCode` — вручную его править не надо. Готовый файл: `watch/dist/com.timew.personal.debug.0.3.0.rpk`.
 
 **3. Установить.** Mi Fitness → Я → О программе → Отладка → Установить стороннее приложение.
 
