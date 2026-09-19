@@ -80,8 +80,8 @@ export default {
     undoTimer: 0,
     showQuick: true,
     showCancel: false,
-    homeAvailable: true,
-    homeLabel: "Дом"
+    homeAvailable: false,
+    homeLabel: "Дом · ?"
   },
 
   onShow() {
