@@ -20,7 +20,7 @@ export function guard(timeoutMs, onTimeout) {
     if (onTimeout) onTimeout()
   }, timeoutMs)
 
-  return function settle(handler) {
+  function settle(handler) {
     return function() {
       if (finished) return
       finished = true
@@ -28,4 +28,13 @@ export function guard(timeoutMs, onTimeout) {
       if (handler) handler.apply(null, arguments)
     }
   }
+  // Synchronous exceptions can happen before a callback is registered. Give
+  // callers a way to close the watchdog immediately instead of keeping the
+  // process (and the watch page) alive until the full timeout.
+  settle.cancel = function() {
+    if (finished) return
+    finished = true
+    clearTimeout(timer)
+  }
+  return settle
 }

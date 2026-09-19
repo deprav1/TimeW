@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { fetchModule, file, storage, resetAll } from "../testkit/system.mjs";
 
 const { loadSettings } = await import("../src/common/settings.js");
-const { query, voiceUri, listNotes, deleteNote, confirmHome } = await import("../src/common/api.js");
+const { query, voiceUri, voiceBytes, status, listNotes, deleteNote, confirmHome, undoHome } = await import("../src/common/api.js");
 
 const GATEWAY = "http://gateway.test:8787";
 const TOKEN = "тестовый-токен";
@@ -81,6 +81,30 @@ test("вопрос голосом идёт без intent — тип опреде
   fetchModule.scripted.push(ok({ kind: "ai", text: "ответ", transcript: "вопрос" }));
   await new Promise((done, fail) => voiceUri("internal://cache/a.opus", "audio/opus", "", done, fail));
   assert.ok(!lastCall().url.includes("intent="), lastCall().url);
+});
+
+test("потоковая WAV-запись уходит тем же JSON-транспортом с длительностью", async () => {
+  await ready();
+  fetchModule.scripted.push(ok({ kind: "ai", text: "ответ" }));
+  const wav = new Uint8Array([0x52, 0x49, 0x46, 0x46]).buffer;
+  await new Promise((done, fail) => voiceBytes(wav, "audio/wav", "", done, fail, { recordedMs: 1350 }));
+  const call = lastCall();
+  assert.equal(call.header["X-TimeW-Record-Ms"], "1350");
+  const body = JSON.parse(call.data);
+  assert.equal(body.contentType, "audio/wav");
+  assert.equal(body.audioBase64, "UklGRg==");
+});
+
+test("status и отмена света используют защищённые короткие endpoints", async () => {
+  await ready();
+  fetchModule.scripted.push(ok({ runtime: { revision: "r1" } }), ok({ kind: "home", executed: true }));
+  await new Promise((done, fail) => status(done, fail));
+  assert.equal(lastCall().url, `${GATEWAY}/api/v1/status`);
+  assert.equal(lastCall().header["X-TimeW-Device-Token"], TOKEN);
+  await new Promise((done, fail) => undoHome("undo-1", done, fail));
+  assert.equal(lastCall().url, `${GATEWAY}/api/v1/home/undo`);
+  assert.equal(JSON.parse(lastCall().data).undoToken, "undo-1");
+  assert.ok(lastCall().header["Idempotency-Key"]);
 });
 
 test("пропавшая запись отличается от обрыва связи", async () => {

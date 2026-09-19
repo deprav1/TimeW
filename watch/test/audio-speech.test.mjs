@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { audio, record, request, resetAll } from "../testkit/system.mjs";
 
-const { recordAudio } = await import("../src/common/audio.js");
+const { recordAudio, recordingCapability } = await import("../src/common/audio.js");
 const { speak, stopSpeaking } = await import("../src/common/speech.js");
 
 test("синхронный отказ записи возвращается как ошибка, а не вешает экран", async () => {
@@ -10,6 +10,23 @@ test("синхронный отказ записи возвращается ка
   record.throwOnStart = true;
   const error = await new Promise((resolve) => recordAudio(() => resolve(null), resolve));
   assert.match(error.message, /начать запись|record unavailable/i);
+});
+
+test("кадры PCM собираются в WAV и возвращают отчёт автостопа", async () => {
+  resetAll();
+  const speech = new Uint8Array(2048);
+  for (let i = 0; i < speech.length; i += 2) {
+    speech[i] = 0x20;
+    speech[i + 1] = 0x03;
+  }
+  record.scripted = { frames: [speech, new Uint8Array(2048)] };
+  const audioFile = await new Promise((resolve, reject) => recordAudio(resolve, reject));
+  assert.equal(audioFile.contentType, "audio/wav");
+  assert.ok(audioFile.bytes instanceof ArrayBuffer);
+  assert.equal(new Uint8Array(audioFile.bytes)[0], 0x52);
+  assert.equal(audioFile.capture.mode, "pcm-auto-stop");
+  assert.equal(audioFile.capture.frameCount, 2);
+  assert.equal(recordingCapability().last.frameCount, 2);
 });
 
 test("синхронный отказ загрузки озвучки возвращается как ошибка", async () => {

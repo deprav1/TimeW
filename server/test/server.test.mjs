@@ -120,6 +120,11 @@ test("does not turn arbitrary text into a home action", () => {
   assert.equal(parseHomeCommand("поставь будильник"), null);
 });
 
+test("does not choose a room or action when the spoken command is ambiguous", () => {
+  assert.equal(parseHomeCommand("включи и выключи свет в спальне"), null);
+  assert.deepEqual(parseHomeCommand("выключи свет в спальне и на кухне"), { action: "off", device: "light", room: null });
+});
+
 // --- HTTP tests --------------------------------------------------------------
 
 test("GET /health is public and reports demo mode", async () => {
@@ -144,6 +149,9 @@ test("GET /api/v1/status is protected and reports capabilities without secrets",
     assert.equal(body.buildId, config.buildId);
     assert.equal(body.capabilities.notes, true);
     assert.equal(body.capabilities.homeConfirmation, true);
+    assert.equal(body.capabilities.immediateLight, false);
+    assert.equal(body.runtime.autoStop, true);
+    assert.ok(body.runtime.revision);
     assert.equal("apiKey" in body, false);
   } finally { config.token = original; }
 });
@@ -161,20 +169,28 @@ test("query idempotency key returns the original note and does not duplicate it"
   assert.equal(notes.notes.filter((note) => note.id === a.note.id).length, 1);
 });
 
-test("a confirmation token is single-use", async () => {
+test("an immediate light action returns a one-shot undo receipt", async () => {
+  const commandCalls = [];
   await withMockTuya(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     if (req.method === "GET" && url.pathname === "/v1.0/token") return tokenHandler("tok-confirm")(res);
+    if (req.method === "POST" && url.pathname.includes("/commands")) commandCalls.push(true);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ success: true, result: true }));
   }, async () => {
     await writeFile(devicesJsonPath, JSON.stringify({ bedroom: ["dev-confirm"] }), "utf8");
-    const prepared = await fetch(`${base}/api/v1/query`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: "включи свет в спальне" }) });
+    const prepared = await fetch(`${base}/api/v1/query`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": "light-once" }, body: JSON.stringify({ text: "включи свет в спальне", requestId: "light-once" }) });
     const body = await prepared.json();
-    const first = await fetch(`${base}/api/v1/home/confirm`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmationToken: body.confirmationToken }) });
-    const second = await fetch(`${base}/api/v1/home/confirm`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmationToken: body.confirmationToken }) });
+    const repeated = await fetch(`${base}/api/v1/query`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": "light-once" }, body: JSON.stringify({ text: "включи свет в спальне", requestId: "light-once" }) });
+    assert.equal(repeated.status, 200);
+    assert.equal(body.executed, true);
+    assert.ok(body.undoToken);
+    assert.equal(body.requiresConfirmation, false);
+    const first = await fetch(`${base}/api/v1/home/undo`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ undoToken: body.undoToken }) });
+    const second = await fetch(`${base}/api/v1/home/undo`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ undoToken: body.undoToken }) });
     assert.equal(first.status, 200);
     assert.equal(second.status, 410);
+    assert.equal(commandCalls.length, 2, "the first action and its inverse, never a duplicate toggle");
   });
 });
 
@@ -444,7 +460,7 @@ test("OPTIONS returns 204 with no body and CORS headers", async () => {
   assert.equal(text, "");
   assert.equal(res.headers.get("access-control-allow-origin"), "*");
   assert.equal(res.headers.get("access-control-allow-methods"), "GET, POST, DELETE, OPTIONS");
-  assert.equal(res.headers.get("access-control-allow-headers"), "Content-Type, X-TimeW-Device-Token, Idempotency-Key, X-TimeW-Request-Id");
+  assert.equal(res.headers.get("access-control-allow-headers"), "Content-Type, X-TimeW-Device-Token, Idempotency-Key, X-TimeW-Request-Id, X-TimeW-Record-Ms");
   assert.equal(res.headers.get("access-control-max-age"), "86400");
 });
 
@@ -734,18 +750,10 @@ test("POST /api/v1/query executes a light command via Tuya when devices.json map
       assert.equal(res.status, 200);
       const body = await res.json();
       assert.equal(body.kind, "home");
-      assert.equal(body.executed, false);
-      assert.equal(body.requiresConfirmation, true);
-      assert.equal(commandCalls.length, 0, "preparation must not call Tuya");
-      const confirm = await fetch(`${base}/api/v1/home/confirm`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ confirmationToken: body.confirmationToken })
-      });
-      assert.equal(confirm.status, 200);
-      const confirmed = await confirm.json();
-      assert.equal(confirmed.executed, true);
-      assert.equal(confirmed.text, "Выключил свет в спальне");
-      assert.deepEqual(confirmed.devices, ["dev-1"]);
+      assert.equal(body.executed, true);
+      assert.equal(body.requiresConfirmation, false);
+      assert.equal(body.text, "Выключил свет в спальне");
+      assert.deepEqual(body.devices, ["dev-1"]);
       assert.equal(commandCalls.length, 1, "expected exactly one POST commands call");
       assert.deepEqual(commandCalls[0], { commands: [{ code: "switch_led", value: false }] });
     }
@@ -938,12 +946,8 @@ test("a Tuya API-level error (e.g. device offline) surfaces as a clear 502, not 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: "включи свет на кухне" })
       });
-      assert.equal(prepared.status, 200);
-      const preparedBody = await prepared.json();
-      const res = await fetch(`${base}/api/v1/home/confirm`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ confirmationToken: preparedBody.confirmationToken })
-      });
+      assert.equal(prepared.status, 502);
+      const res = prepared;
       assert.equal(res.status, 502);
       const body = await res.json();
       assert.equal(body.ok, false);

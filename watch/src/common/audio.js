@@ -1,26 +1,17 @@
 import record from "@system.record"
-import { MAX_RECORDING_MS, RECORD_TIMEOUT_MS } from "./config"
+import { RECORD_TIMEOUT_MS } from "./config"
+import { getRecordingSettings } from "./settings"
 import { guard } from "./guard"
 
-// Запись голоса на Xiaomi Watch S5.
-//
-// Модуль @system.record официально документирован Xiaomi:
-// https://iot.mi.com/vela/quickapp/en/features/system/record.html
-// В таблице поддержки запись есть ТОЛЬКО у Watch S5 — на S3/S4, Redmi Watch
-// и всех Band она отсутствует. Поэтому приложение и делалось под S5.
-//
-// Ключевая особенность: success отдаёт не байты, а { uri } — путь к файлу в
-// кэше приложения. Как именно этот файл доставить на шлюз, документация не
-// описывает, поэтому адаптер отдаёт uri наверх, а выбор способа отправки
-// остаётся в api.js (там реализованы два пути с фолбэком).
-//
-// Что ещё не проверено на живом устройстве (см. docs/physical-checklist.md):
-// принимает ли конкретная прошивка format "opus"/"wav"; какая схема у uri;
-// нужен ли config.background.features при погасшем экране; есть ли системный
-// диалог разрешения микрофона.
+// Two capture paths are kept deliberately. PCM frames provide local
+// end-of-speech detection; the proven Opus file path remains the fallback
+// for firmware without frame events or parameters it rejects.
+var active = null
+var lastReport = {
+  mode: "not-run", frameEventAvailable: false, frameCount: 0,
+  frameBytes: [], signalMetrics: false, stoppedBySilence: false
+}
 
-// Документация Xiaomi: 200 — нет места, 202 — неверные параметры,
-// 205 — запись уже идёт.
 function messageForCode(code) {
   if (code === 200) return "На часах не хватает места для записи"
   if (code === 202) return "Рантайм отклонил параметры записи"
@@ -37,94 +28,217 @@ function errorFrom(data, code, fallback) {
   return error
 }
 
-// Основной набор параметров — из документации Xiaomi для S5.
-// Opus 16 кГц mono: компактно и достаточно для распознавания речи.
-function primaryOptions() {
-  return {
-    duration: MAX_RECORDING_MS,
-    sampleRate: 16000,
-    numberOfChannels: 1,
-    // Xiaomi's 16 kHz mono Opus guidance puts the efficient range below
-    // 23 kbps. 22 kbps keeps speech clear while avoiding needless upload
-    // size on a watch/phone link.
-    encodeBitRate: 22000,
-    format: "opus"
-  }
-}
-
-// Запасной набор. На watchdoc.quickapp.cn тот же модуль описан в упрощённом
-// виде — без выбора формата, с фиксированными дефолтами. Если прошивка
-// окажется ближе к тому варианту, подробные параметры вернут код 202, и
-// тогда имеет смысл позвать start вообще без них.
-function fallbackOptions() {
-  return { duration: MAX_RECORDING_MS }
+function hasFrameEvents() {
+  try {
+    return !!record && "onframerecorded" in record
+  } catch (error) { return false }
 }
 
 function contentTypeFor(uri, format) {
   var value = String(uri || "").toLowerCase()
   if (value.indexOf(".opus") >= 0) return "audio/opus"
   if (value.indexOf(".wav") >= 0) return "audio/wav"
-  if (value.indexOf(".pcm") >= 0) return "application/octet-stream"
   if (format === "opus") return "audio/opus"
   if (format === "wav") return "audio/wav"
   return "application/octet-stream"
 }
 
-function start(options, format, done, fail) {
-  // Если рантайм не вызовет ни success, ни fail, запись просто не завершится
-  // и приложение останется в состоянии «слушаю…» навсегда.
-  var settle = guard(RECORD_TIMEOUT_MS, function() {
+function rms16(frame) {
+  var bytes = frame instanceof Uint8Array ? frame : new Uint8Array(frame)
+  if (bytes.length < 2) return 0
+  var sum = 0
+  var count = Math.floor(bytes.length / 2)
+  for (var i = 0; i + 1 < bytes.length; i += 2) {
+    var value = bytes[i] | (bytes[i + 1] << 8)
+    if (value >= 32768) value -= 65536
+    sum += value * value
+  }
+  return Math.sqrt(sum / count)
+}
+
+function copyBytes(value) {
+  var source = value instanceof Uint8Array ? value : new Uint8Array(value)
+  var result = new Uint8Array(source.length)
+  result.set(source)
+  return result
+}
+
+function writeAscii(view, offset, text) {
+  for (var i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i))
+}
+
+function pcmFramesToWav(frames, sampleRate) {
+  var length = 0
+  frames.forEach(function(frame) { length += frame.length })
+  var output = new Uint8Array(44 + length)
+  var view = new DataView(output.buffer)
+  writeAscii(view, 0, "RIFF")
+  view.setUint32(4, 36 + length, true)
+  writeAscii(view, 8, "WAVE")
+  writeAscii(view, 12, "fmt ")
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, sampleRate * 2, true)
+  view.setUint16(32, 2, true)
+  view.setUint16(34, 16, true)
+  writeAscii(view, 36, "data")
+  view.setUint32(40, length, true)
+  var offset = 44
+  frames.forEach(function(frame) { output.set(frame, offset); offset += frame.length })
+  return output.buffer
+}
+
+function fileOptions(settings, format) {
+  if (!format) return { duration: settings.maxRecordingMs }
+  return {
+    duration: settings.maxRecordingMs,
+    sampleRate: 16000,
+    numberOfChannels: 1,
+    encodeBitRate: 22000,
+    format: format
+  }
+}
+
+function startFile(settings, done, fail, simplified) {
+  var startedAt = Date.now()
+  lastReport = {
+    mode: simplified ? "file-default" : "file-opus",
+    frameEventAvailable: hasFrameEvents(), frameCount: 0, frameBytes: [],
+    signalMetrics: false, stoppedBySilence: false
+  }
+  var settle = guard(Math.max(RECORD_TIMEOUT_MS, settings.maxRecordingMs + 8000), function() {
     stopRecording()
     fail(new Error("Запись не завершилась вовремя"))
   })
-
-  function settleOk(data) {
-    var uri = data && (data.uri || data.path || data)
-    if (!uri || typeof uri !== "string") {
-      fail(new Error("Рантайм не вернул путь к записи"))
-      return
-    }
-    done({ uri: uri, contentType: contentTypeFor(uri, format) })
-  }
-
-  function settleFail(data, code) {
-    fail(errorFrom(data, code, "Не удалось записать голос"))
-  }
-
   var request = {
-    success: settle(settleOk),
-    fail: settle(settleFail)
+    success: settle(function(data) {
+      active = null
+      var uri = data && (data.uri || data.path || data)
+      if (!uri || typeof uri !== "string") {
+        fail(new Error("Рантайм не вернул путь к записи"))
+        return
+      }
+      done({ uri: uri, contentType: contentTypeFor(uri, simplified ? "" : "opus"),
+        recordedMs: Date.now() - startedAt, capture: lastReport })
+    }),
+    fail: settle(function(data, code) {
+      active = null
+      var error = errorFrom(data, code, "Не удалось записать голос")
+      if (!simplified && error.code === 202) {
+        startFile(settings, done, fail, true)
+        return
+      }
+      fail(error)
+    })
   }
+  var options = fileOptions(settings, simplified ? "" : "opus")
   Object.keys(options).forEach(function(key) { request[key] = options[key] })
-
-  try {
-    record.start(request)
-  } catch (error) {
-    // Vela may reject an unsupported format or a missing microphone
-    // permission synchronously, without invoking fail. Treat that exactly
-    // like an asynchronous failure so the page never remains busy forever.
-    settle(function() { fail(errorFrom(error, error && error.code, "Не удалось начать запись")) })()
+  active = { mode: "file" }
+  try { record.start(request) } catch (error) {
+    if (settle.cancel) settle.cancel()
+    active = null
+    fail(errorFrom(error, error && error.code, "Не удалось начать запись"))
   }
 }
 
-// Останавливает запись досрочно. duration уже задан, поэтому в обычном
-// сценарии останавливать вручную не нужно — но кнопка «стоп» на это опирается.
-export function stopRecording() {
-  try {
-    record.stop()
-  } catch (error) {
-    // Рантайм может не иметь stop, если запись уже завершилась сама.
+function startFramed(settings, done, fail) {
+  var frames = []
+  var startedAt = Date.now()
+  var speechStarted = false
+  var silenceStartedAt = 0
+  var stopping = false
+  var finished = false
+  lastReport = {
+    mode: "pcm-auto-stop", frameEventAvailable: true, frameCount: 0,
+    frameBytes: [], signalMetrics: true, stoppedBySilence: false
   }
+
+  function finishOk() {
+    if (finished) return
+    finished = true
+    active = null
+    try { record.onframerecorded = null } catch (error) {}
+    if (!frames.length) {
+      lastReport.mode = "file-opus-fallback"
+      startFile(settings, done, fail, false)
+      return
+    }
+    done({ bytes: pcmFramesToWav(frames, 16000), contentType: "audio/wav",
+      recordedMs: Date.now() - startedAt, capture: lastReport })
+  }
+
+  var settle = guard(Math.max(RECORD_TIMEOUT_MS, settings.maxRecordingMs + 8000), function() {
+    stopRecording()
+    finishOk()
+  })
+
+  record.onframerecorded = function(event) {
+    if (finished || !event || !event.frameBuffer) return
+    var frame = copyBytes(event.frameBuffer)
+    frames.push(frame)
+    lastReport.frameCount += 1
+    if (lastReport.frameBytes.length < 12) lastReport.frameBytes.push(frame.length)
+    var now = Date.now()
+    var energy = rms16(frame)
+    if (energy >= settings.silenceThreshold) {
+      speechStarted = true
+      silenceStartedAt = 0
+    } else if (speechStarted && now - startedAt >= settings.speechGraceMs) {
+      if (!silenceStartedAt) silenceStartedAt = now
+      if (!stopping && now - silenceStartedAt >= settings.silenceDurationMs) {
+        stopping = true
+        lastReport.stoppedBySilence = true
+        stopRecording()
+      }
+    }
+    if (event.isLastFrame) settle(finishOk)()
+  }
+
+  active = { mode: "framed" }
+  try {
+    record.start({
+      duration: settings.maxRecordingMs,
+      sampleRate: 16000,
+      numberOfChannels: 1,
+      encodeBitRate: 256000,
+      frameSize: settings.frameSize,
+      format: "pcm",
+      success: function() {},
+      complete: settle(finishOk),
+      fail: settle(function(data, code) {
+        active = null
+        try { record.onframerecorded = null } catch (error) {}
+        var captureError = errorFrom(data, code, "Автостоп записи недоступен")
+        if (captureError.code === 202) {
+          startFile(settings, done, fail, false)
+          return
+        }
+        fail(captureError)
+      })
+    })
+  } catch (error) {
+    if (settle.cancel) settle.cancel()
+    active = null
+    try { record.onframerecorded = null } catch (ignored) {}
+    startFile(settings, done, fail, false)
+  }
+}
+
+export function stopRecording() {
+  try { record.stop() } catch (error) {}
+}
+
+export function recordingCapability() {
+  return { frameEventAvailable: hasFrameEvents(), last: lastReport }
 }
 
 export function recordAudio(done, fail) {
-  start(primaryOptions(), "opus", done, function(error) {
-    // 202 означает «неверные параметры»: пробуем упрощённый вызов, прежде
-    // чем сдаваться. Все прочие коды — настоящие ошибки, их отдаём сразу.
-    if (error && error.code === 202) {
-      start(fallbackOptions(), "", done, fail)
-      return
-    }
-    fail(error)
-  })
+  var settings = getRecordingSettings()
+  if (settings.autoStop && hasFrameEvents()) {
+    startFramed(settings, done, fail)
+    return
+  }
+  startFile(settings, done, fail, false)
 }

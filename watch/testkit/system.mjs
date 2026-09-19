@@ -156,19 +156,29 @@ export const prompt = {
 export const record = {
   scripted: null,
   throwOnStart: false,
+  onframerecorded: null,
   start(options) {
     if (record.throwOnStart) throw new Error("record unavailable");
     const next = record.scripted;
     if (!next) return;
     setTimeout(() => {
-      if (next.error) options.fail && options.fail(next.error, next.error.code);
-      else options.success && options.success(next.result);
+      if (next.error) { options.fail && options.fail(next.error, next.error.code); return; }
+      if (next.frames && typeof record.onframerecorded === "function") {
+        next.frames.forEach((frame, index) => record.onframerecorded({
+          frameBuffer: frame,
+          isLastFrame: index === next.frames.length - 1
+        }));
+        if (options.complete) options.complete();
+        return;
+      }
+      options.success && options.success(next.result);
     }, 0);
   },
   stop() {},
   reset() {
     record.scripted = null;
     record.throwOnStart = false;
+    record.onframerecorded = null;
   }
 };
 

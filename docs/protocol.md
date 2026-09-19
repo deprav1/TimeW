@@ -51,7 +51,7 @@ Access-Control-Max-Age: 86400
 эффективный режим и флаги возможностей без ключей и других секретов:
 
 ```json
-{"ok":true,"service":"timew-gateway","mode":"demo","provider":"mock","buildId":"local","capabilities":{"ai":false,"notes":true,"speech":false,"home":false,"homeConfirmation":true}}
+{"ok":true,"service":"timew-gateway","mode":"demo","provider":"mock","buildId":"local","configRevision":"voice-1","runtime":{"maxRecordingMs":10000,"silenceThreshold":450,"silenceDurationMs":1000,"speechGraceMs":900,"frameSize":2048,"requestTimeoutMs":35000,"uploadTimeoutMs":60000,"ttsFormat":"mp3","autoStop":true,"capabilities":{"frameRecording":true,"immediateLight":true,"undoLight":true}},"capabilities":{"ai":false,"notes":true,"speech":false,"home":false,"homeConfirmation":true,"immediateLight":false,"undoLight":false,"autoStop":true}}
 ```
 
 ## Текстовый запрос
@@ -90,16 +90,19 @@ Access-Control-Max-Age: 86400
 }
 ```
 
-**`kind: "home"`** — распознана команда умного дома. Подготовка никогда не
-вызывает Tuya и возвращает одноразовый `confirmationToken` (действует 2 минуты):
+**`kind: "home"`** — распознана команда умного дома. Для точной команды
+включения/выключения света в одной настроенной комнате шлюз сразу вызывает
+Tuya и возвращает квитанцию. Действие можно один раз отменить в течение 30
+секунд через `undoToken`:
 
 ```json
-{"ok":true,"kind":"home","command":{"action":"off","device":"light","room":"bedroom"},"requiresConfirmation":true,"confirmationToken":"…","confirmationExpiresAt":"…","source":"parser"}
+{"ok":true,"kind":"home","command":{"action":"off","device":"light","room":"bedroom"},"executed":true,"requiresConfirmation":false,"text":"Выключил свет в спальне","devices":["…"],"undoToken":"…","undoExpiresAt":"…","undoAvailable":true,"source":"tuya"}
 ```
 
-После явного подтверждения клиента: `POST /api/v1/home/confirm` с телом
-`{"confirmationToken":"…"}`. Токен одноразовый; истёкший или уже
-использованный токен даёт `410 confirmation_expired`.
+`POST /api/v1/home/undo` с телом `{"undoToken":"…"}` выполняет обратное
+действие. Повторный или истёкший токен даёт `410 undo_expired`. Розетки,
+замки, ворота и сигнализация остаются заблокированными; неоднозначная комната
+или отсутствие карты устройств никогда не приводит к вызову Tuya.
 
 Если комната не распознана, `room` будет `null`, а `text` попросит уточнить. Это сознательная граница первой беты: Google Home SDK и OAuth появятся в Android-компаньоне после проверки видимости конкретных Tuya-светильников.
 
@@ -115,7 +118,11 @@ Access-Control-Max-Age: 86400
 {"ok":true,"transcript":"Сколько лететь до Лиссабона","kind":"ai","text":"...","source":"gemini","speechId":"…"}
 ```
 
-kind определяется так же, как в /api/v1/query: при intent=note и preview=1 шлюз только распознаёт текст и возвращает kind=draft; заметка сохраняется только отдельным подтверждённым запросом. Домашняя команда сначала подготавливается и выполняется только через /api/v1/home/confirm, обычный вопрос уходит модели.
+kind определяется так же, как в /api/v1/query: при intent=note и preview=1 шлюз только распознаёт текст и возвращает kind=draft; заметка сохраняется только отдельным подтверждённым запросом. Точная команда света выполняется сразу; обычный вопрос уходит модели.
+
+Успешный голосовой ответ дополнительно содержит `requestId` и безопасные
+`timings` (`recordMs`, `receiveMs`, `providerMs`, `tuyaMs`, `totalMs`). Шлюз
+пишет эти же этапы одной строкой в лог, без текста, аудио и ключей.
 
 Зачем отдельный эндпоинт: раньше часы делали два круга — сначала расшифровка, потом вопрос. На часах Wi-Fi поднимается по требованию, поэтому лишний круг стоит секунд. Для Gemini шлюз делает **один** вызов, в котором модель и расшифровывает, и отвечает.
 

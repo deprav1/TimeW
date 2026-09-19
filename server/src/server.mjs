@@ -71,7 +71,18 @@ const config = {
   tuyaAccessSecret: env.TUYA_ACCESS_SECRET || "",
   tuyaUid: env.TUYA_UID || "",
   tuyaBaseUrl: (env.TUYA_BASE_URL || "https://openapi.tuyaeu.com").replace(/\/$/, ""),
-  tuyaTimeoutMs: Number(env.TUYA_TIMEOUT_MS || 10000)
+  tuyaTimeoutMs: Number(env.TUYA_TIMEOUT_MS || 10000),
+  // Runtime tuning is deliberately exposed through the protected status
+  // endpoint.  The watch can adjust these values without a new RPK, while
+  // the gateway keeps conservative bounds even if an env value is wrong.
+  recordingMaxMs: Number(env.RECORDING_MAX_MS || 10000),
+  recordingSilenceThreshold: Number(env.RECORDING_SILENCE_THRESHOLD || 450),
+  recordingSilenceMs: Number(env.RECORDING_SILENCE_MS || 1000),
+  recordingSpeechGraceMs: Number(env.RECORDING_SPEECH_GRACE_MS || 900),
+  recordingFrameSize: Number(env.RECORDING_FRAME_SIZE || 2048),
+  autoStopEnabled: !["0", "false", "off"].includes(String(env.AUTO_STOP_ENABLED || "true").toLowerCase()),
+  runtimeConfigRevision: env.TIMEW_CONFIG_REVISION || "voice-1",
+  ttsFormat: env.TTS_FORMAT || (env.TTS_PROVIDER === "gemini" || (!env.TTS_PROVIDER && env.AI_PROVIDER === "gemini") ? "wav" : "mp3")
 };
 const notesPath = join(config.dataDir, "notes.json");
 
@@ -89,8 +100,37 @@ function setStore(next) {
 const IDEMPOTENCY_TTL_MS = 10 * 60 * 1000;
 const IDEMPOTENCY_MAX = 200;
 const CONFIRMATION_TTL_MS = 2 * 60 * 1000;
+const HOME_ACTION_TTL_MS = 30 * 1000;
 const IDEMPOTENCY_PREFIX = "idem:";
 const CONFIRMATION_PREFIX = "confirm:";
+const HOME_ACTION_PREFIX = "home-action:";
+const LAST_HOME_ACTION_KEY = HOME_ACTION_PREFIX + "last";
+const ACTION_LOCKS = new Map();
+const HOME_RESULTS = new Map();
+
+async function withActionLock(key, work) {
+  const previous = ACTION_LOCKS.get(key) || Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => { release = resolve; });
+  ACTION_LOCKS.set(key, current);
+  await previous;
+  try { return await work(); }
+  finally {
+    release();
+    if (ACTION_LOCKS.get(key) === current) ACTION_LOCKS.delete(key);
+  }
+}
+
+async function homeOnce(requestKey, work) {
+  if (!requestKey) return work();
+  return withActionLock(`home-request:${requestKey}`, async () => {
+    if (HOME_RESULTS.has(requestKey)) return HOME_RESULTS.get(requestKey);
+    const result = await work();
+    HOME_RESULTS.set(requestKey, result);
+    setTimeout(() => HOME_RESULTS.delete(requestKey), IDEMPOTENCY_TTL_MS).unref?.();
+    return result;
+  });
+}
 
 function requestId(req, body) {
   const value = req.headers["idempotency-key"] || req.headers["x-timew-request-id"] || body?.requestId;
@@ -195,6 +235,38 @@ function audioMimeForGemini(bytes, declared) {
 
 function publicMode() {
   return config.provider === "mock" || !config.apiKey ? "demo" : "live";
+}
+
+function boundedNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(number)));
+}
+
+// This is the only configuration surface sent to the watch.  It contains
+// tuning knobs and capability flags, never credentials, device ids, or
+// provider URLs.  Keep the shape compact: it is fetched on every cold start
+// and cached locally by the watch for offline use.
+function runtimeSettings() {
+  return {
+    revision: String(config.runtimeConfigRevision || "voice-1"),
+    maxRecordingMs: boundedNumber(config.recordingMaxMs, 3000, 30000, 10000),
+    silenceThreshold: boundedNumber(config.recordingSilenceThreshold, 50, 12000, 450),
+    silenceDurationMs: boundedNumber(config.recordingSilenceMs, 400, 4000, 1000),
+    speechGraceMs: boundedNumber(config.recordingSpeechGraceMs, 300, 3000, 900),
+    frameSize: boundedNumber(config.recordingFrameSize, 512, 4096, 2048),
+    requestTimeoutMs: boundedNumber(config.providerTimeoutMs + 15000, 15000, 75000, 35000),
+    uploadTimeoutMs: boundedNumber(Math.max(config.providerTimeoutMs + 30000, 60000), 30000, 120000, 60000),
+    ttsFormat: config.ttsFormat === "mp3" ? "mp3" : "wav",
+    autoStop: Boolean(config.autoStopEnabled),
+    capabilities: {
+      // Frame delivery is probed by the watch; the server cannot infer the
+      // installed firmware. Home capabilities, however, are authoritative.
+      frameRecording: "probe",
+      immediateLight: isTuyaEnabled(),
+      undoLight: isTuyaEnabled()
+    }
+  };
 }
 
 function isTuyaEnabled() {
@@ -725,20 +797,22 @@ const HOME_DEVICE_PATTERNS = [
 
 function parseHomeCommand(text) {
   const value = text.toLocaleLowerCase("ru-RU");
-  const action = /(выключ|выкл|погаси|off)/u.test(value)
-    ? "off"
-    : /(включ|вкл|зажги|on)/u.test(value)
-      ? "on"
-      : null;
+  const hasOff = /(выключ|выкл|погаси|off)/u.test(value);
+  const hasOn = /(включ|вкл|зажги|on)/u.test(value);
+  const action = hasOff === hasOn ? null : hasOff ? "off" : "on";
   if (!action) return null;
-  const deviceEntry = HOME_DEVICE_PATTERNS.find(([pattern]) => pattern.test(value));
-  if (!deviceEntry) return null;
+  const deviceEntries = HOME_DEVICE_PATTERNS.filter(([pattern]) => pattern.test(value));
+  if (deviceEntries.length !== 1) return null;
   const rooms = [
     ["спальн", "bedroom"], ["гостин", "living_room"], ["кухн", "kitchen"],
     ["ванн", "bathroom"], ["кабинет", "office"], ["детск", "kids_room"]
   ];
-  const room = rooms.find(([needle]) => value.includes(needle));
-  return { action, device: deviceEntry[1], room: room ? room[1] : null };
+  const matchedRooms = rooms.filter(([needle]) => value.includes(needle));
+  // More than one room is ambiguous, even if one happens to appear first in
+  // our list.  Returning room:null forces a clarification and guarantees an
+  // exact deterministic target before any Tuya call.
+  const room = matchedRooms.length === 1 ? matchedRooms[0][1] : null;
+  return { action, device: deviceEntries[0][1], room };
 }
 
 function demoTranscript() {
@@ -1053,25 +1127,69 @@ async function providerVoiceGemini(audioBytes, contentType, history) {
 // the response body — never writes to `res` itself, so both
 // /api/v1/query and /api/v1/voice can add their own extra fields (e.g. a
 // transcript) before sending it.
-async function executeHomeCommand(command, deviceIds) {
+async function executeHomeCommand(command, deviceIds, { metrics, recordUndo = true, undo = false } = {}) {
+  // The current Tuya mapping knows how to switch lights only.  Keeping this
+  // check here (in addition to the parser) means a crafted confirmation or
+  // undo request cannot turn an unsupported device class into a switch call.
+  if (!SAFE_INSTANT_DEVICES.has(command.device)) {
+    const err = new Error("This home device class is disabled");
+    err.statusCode = 403;
+    err.publicMessage = "Эта категория устройств пока отключена ради безопасности";
+    err.code = "home_disabled";
+    throw err;
+  }
+  const startedAt = Date.now();
   const value = command.action === "on";
-  await Promise.all(deviceIds.map((id) => tuyaRequest("POST", `/v1.0/iot-03/devices/${id}/commands`, {
-    commands: [{ code: "switch_led", value }]
-  })));
+  const changed = [];
+  try {
+    // Execute sequentially so a partial Tuya failure can be compensated.
+    // This is slower for multi-lamp rooms, but never leaves a room half
+    // switched without an undo receipt.
+    for (const id of deviceIds) {
+      await tuyaRequest("POST", `/v1.0/iot-03/devices/${id}/commands`, {
+        commands: [{ code: "switch_led", value }]
+      });
+      changed.push(id);
+    }
+  } catch (cause) {
+    if (changed.length) {
+      await Promise.all(changed.map((id) => tuyaRequest("POST", `/v1.0/iot-03/devices/${id}/commands`, {
+        commands: [{ code: "switch_led", value: !value }]
+      }).catch(() => null)));
+      cause.publicMessage = "Не удалось переключить все лампы; выполнен откат частичного изменения";
+    }
+    throw cause;
+  }
+  if (metrics) metrics.tuyaMs = Date.now() - startedAt;
   const roomText = ROOM_NAMES_RU[command.room] || command.room;
-  return {
+  const result = {
     ok: true, kind: "home", command, executed: true,
     requiresConfirmation: false,
-    text: `${command.action === "off" ? "Выключил" : "Включил"} свет в ${roomText}`,
+    text: `${undo ? "Вернул" : command.action === "off" ? "Выключил" : "Включил"} свет в ${roomText}`,
     devices: deviceIds, source: "tuya"
   };
+  if (recordUndo) {
+    const undoToken = randomUUID();
+    const expiresAt = Date.now() + HOME_ACTION_TTL_MS;
+    await store.kvSet(LAST_HOME_ACTION_KEY, {
+      token: undoToken,
+      command,
+      deviceIds,
+      executedAt: new Date().toISOString(),
+      expiresAt
+    }, HOME_ACTION_TTL_MS);
+    result.undoToken = undoToken;
+    result.undoExpiresAt = new Date(expiresAt).toISOString();
+    result.undoAvailable = true;
+  }
+  return result;
 }
 
-async function buildHomeCommandResult(command) {
+async function buildHomeCommandResult(command, metrics, requestKey) {
   const base = { ok: true, kind: "home", command, executed: false };
-  // Every home command is prepared first. Even harmless lights require an
-  // explicit, separate confirmation so a misheard watch command has no side
-  // effect. The token is single-use and expires quickly.
+  // Lights are the one deterministic, reversible action allowed to execute
+  // immediately.  The parser, exact room lookup, and allowlist are all
+  // checked before this branch; model-generated text never reaches it.
   if (!SAFE_INSTANT_DEVICES.has(command.device)) {
     return { ...base, text: "Команда распознана. Нужна проверка на телефоне.", requiresConfirmation: true, source: "parser" };
   }
@@ -1083,7 +1201,10 @@ async function buildHomeCommandResult(command) {
   }
 
   const deviceMap = await loadDeviceMap();
-  const deviceIds = deviceMap ? deviceMap[command.room] : null;
+  const mapped = deviceMap ? deviceMap[command.room] : null;
+  const deviceIds = Array.isArray(mapped)
+    ? Array.from(new Set(mapped.filter((id) => typeof id === "string" && id.trim()).map((id) => id.trim())))
+    : typeof mapped === "string" && mapped.trim() ? [mapped.trim()] : null;
   if (!deviceIds || !deviceIds.length) {
     return {
       ...base,
@@ -1094,18 +1215,7 @@ async function buildHomeCommandResult(command) {
       source: "parser"
     };
   }
-
-  const token = randomUUID();
-  const expiresAt = Date.now() + CONFIRMATION_TTL_MS;
-  await store.kvSet(CONFIRMATION_PREFIX + token, { command, deviceIds }, CONFIRMATION_TTL_MS);
-  return {
-    ...base,
-    text: "Команда подготовлена. Подтвердите выполнение.",
-    requiresConfirmation: true,
-    confirmationToken: token,
-    confirmationExpiresAt: new Date(expiresAt).toISOString(),
-    source: "parser"
-  };
+  return homeOnce(requestKey, () => executeHomeCommand(command, deviceIds, { metrics }));
 }
 
 async function confirmHomeCommand(token) {
@@ -1115,6 +1225,19 @@ async function confirmHomeCommand(token) {
   // второй раз, даже если первое исполнение упало.
   await store.kvDelete(CONFIRMATION_PREFIX + token);
   return executeHomeCommand(entry.command, entry.deviceIds);
+}
+
+async function undoHomeCommand(token, metrics) {
+  return withActionLock(`undo:${token}`, async () => {
+    const entry = await store.kvGet(LAST_HOME_ACTION_KEY);
+    if (!entry || !token || entry.token !== token || Number(entry.expiresAt || 0) <= Date.now()) return null;
+    const inverse = { ...entry.command, action: entry.command.action === "on" ? "off" : "on" };
+    // Keep the receipt until the inverse call succeeds. A transient Tuya
+    // failure can then be retried safely; the lock prevents double toggles.
+    const result = await executeHomeCommand(inverse, entry.deviceIds, { metrics, recordUndo: false, undo: true });
+    await store.kvDelete(LAST_HOME_ACTION_KEY);
+    return { ...result, undoOf: entry.command };
+  });
 }
 
 // Saves a note and returns the response body — same non-writing contract as
@@ -1147,7 +1270,7 @@ async function handleQuery(req, res, reqUrl) {
   }
   const command = parseHomeCommand(text);
   if (command) {
-    const result = await buildHomeCommandResult(command);
+    const result = await buildHomeCommandResult(command, undefined, requestKey);
     await putIdempotent(requestKey, fingerprint, { status: 200, body: result });
     return json(res, 200, result);
   }
@@ -1165,6 +1288,7 @@ async function handleQuery(req, res, reqUrl) {
 // one network call to the AI provider in the common case, via the Gemini
 // single-call optimization below).
 async function handleVoice(req, res, reqUrl) {
+  const startedAt = Date.now();
   const audio = await readAudioBody(req);
   const providerField = audio.isMultipart ? extractMultipartField(audio.raw, audio.requestType, "provider") : undefined;
   const providerParam = providerField !== undefined ? providerField : reqUrl.searchParams.get("provider");
@@ -1185,6 +1309,29 @@ async function handleVoice(req, res, reqUrl) {
   const fingerprint = idempotencyFingerprint("voice", { provider: providerParam || "auto", intent: intentParam || "", audio: audio.bytes.toString("base64") });
   const cached = await getIdempotent(requestKey, fingerprint);
   if (cached) return json(res, cached.status, cached.body);
+  const correlationId = requestKey || randomUUID();
+  const metrics = {
+    recordMs: boundedNumber(req.headers["x-timew-record-ms"], 0, 120000, 0),
+    receiveMs: Date.now() - startedAt
+  };
+  const finish = async (body) => {
+    const finalBody = {
+      ...body,
+      requestId: correlationId,
+      timings: {
+        ...(body.timings || {}),
+        recordMs: metrics.recordMs,
+        receiveMs: metrics.receiveMs,
+        providerMs: metrics.providerMs || 0,
+        tuyaMs: metrics.tuyaMs || 0,
+        totalMs: Date.now() - startedAt
+      }
+    };
+    const t = finalBody.timings;
+    console.log(`voice requestId=${correlationId} record=${t.recordMs} receive=${t.receiveMs} provider=${t.providerMs} tuya=${t.tuyaMs} total=${t.totalMs}`);
+    await putIdempotent(requestKey, fingerprint, { status: 200, body: finalBody });
+    return json(res, 200, finalBody);
+  };
 
   // Gemini optimization: one call transcribes AND answers. Only safe to use
   // the model's `answer` when the transcript turns out to be a plain
@@ -1193,65 +1340,62 @@ async function handleVoice(req, res, reqUrl) {
   // acted on.
   if (provider === "gemini" && config.apiKey) {
     const history = await getDialogHistory();
+    const providerStartedAt = Date.now();
     const { transcript, answer } = await providerVoiceGemini(audio.bytes, audio.contentType, history);
+    metrics.providerMs = Date.now() - providerStartedAt;
 
     if (previewNote) {
       const response = { ok: true, kind: "draft", transcript, text: "Проверьте распознанную заметку", source: "gemini" };
-      await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
-      return json(res, 200, response);
+      return finish(response);
     }
     const note = forceNote ? normalizeText(transcript) : parseNote(transcript);
     if (note) {
       const result = await buildNoteResult(note);
       const response = { ...result, transcript };
-      await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
-      return json(res, 200, response);
+      return finish(response);
     }
     const command = parseHomeCommand(transcript);
     if (command) {
-      const result = await buildHomeCommandResult(command);
+      const result = await buildHomeCommandResult(command, metrics, requestKey);
       const response = { ...result, transcript };
-      await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
-      return json(res, 200, response);
+      return finish(response);
     }
     trackBackgroundWrite(recordDialogTurn(transcript, answer), "recordDialogTurn");
     const speechId = answer ? registerSpeech(answer) : undefined;
     const response = { ok: true, transcript, kind: "ai", text: answer, source: "gemini", ...(speechId ? { speechId } : {}) };
-    await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
-    return json(res, 200, response);
+    return finish(response);
   }
 
   // Every other provider (mock/demo, openai-compatible): sequential
   // transcribe-then-answer, same classification path as /api/v1/query.
+  const providerStartedAt = Date.now();
   const transcribed = await providerTranscribe(audio.bytes, audio.contentType, { provider });
+  metrics.providerMs = Date.now() - providerStartedAt;
   const transcript = transcribed.text;
 
   if (previewNote) {
     const response = { ok: true, kind: "draft", transcript, text: "Проверьте распознанную заметку", source: transcribed.source };
-    await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
-    return json(res, 200, response);
+    return finish(response);
   }
   const note = forceNote ? normalizeText(transcript) : parseNote(transcript);
   if (note) {
     const result = await buildNoteResult(note);
     const response = { ...result, transcript };
-    await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
-    return json(res, 200, response);
+    return finish(response);
   }
   const command = parseHomeCommand(transcript);
   if (command) {
-    const result = await buildHomeCommandResult(command);
+    const result = await buildHomeCommandResult(command, metrics, requestKey);
     const response = { ...result, transcript };
-    await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
-    return json(res, 200, response);
+    return finish(response);
   }
   const history = await getDialogHistory();
   const result = await providerChat(transcript, { provider, history });
   trackBackgroundWrite(recordDialogTurn(transcript, result.text), "recordDialogTurn");
   const speechId = result.text ? registerSpeech(result.text) : undefined;
   const response = { ok: true, transcript, kind: "ai", ...result, ...(speechId ? { speechId } : {}) };
-  await putIdempotent(requestKey, fingerprint, { status: 200, body: response });
-  return json(res, 200, response);
+  metrics.providerMs = Date.now() - providerStartedAt;
+  return finish(response);
 }
 
 // Shared by POST /api/v1/speak and GET /api/v1/speak/:id: turns text into an
@@ -1386,11 +1530,13 @@ function sendAudio(res, audioBuffer, contentType) {
 // the watch itself uses GET /api/v1/speak/:id instead (see below), since
 // @system.audio can only play a URL, not POST bytes.
 async function handleSpeak(req, res) {
+  const startedAt = Date.now();
   const body = await jsonBody(req);
   const text = typeof body.text === "string" ? body.text.trim() : "";
   if (!text) return error(res, 400, "text is required");
   if (text.length > 1000) return error(res, 400, "text must be at most 1000 characters long");
   const speech = await synthesizeSpeech(text);
+  console.log(`tts requestId=${requestId(req, body) || randomUUID()} provider=${Date.now() - startedAt} bytes=${speech.audio.length} total=${Date.now() - startedAt}`);
   sendAudio(res, speech.audio, speech.contentType);
 }
 
@@ -1399,11 +1545,13 @@ async function handleSpeak(req, res) {
 // audio/mpeg. This is what the watch's request.download hits — a plain URL,
 // with the device token in a header rather than the query string.
 async function handleSpeakById(req, res, id) {
+  const startedAt = Date.now();
   const text = await takeSpeechText(id);
   if (text === null) {
     return error(res, 404, "Озвучка не найдена или устарела, запросите ответ заново", "not_found");
   }
   const speech = await synthesizeSpeech(text);
+  console.log(`tts requestId=${id} provider=${Date.now() - startedAt} bytes=${speech.audio.length} total=${Date.now() - startedAt}`);
   sendAudio(res, speech.audio, speech.contentType);
 }
 
@@ -1415,7 +1563,7 @@ async function route(req, res) {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, X-TimeW-Device-Token, Idempotency-Key, X-TimeW-Request-Id",
+      "Access-Control-Allow-Headers": "Content-Type, X-TimeW-Device-Token, Idempotency-Key, X-TimeW-Request-Id, X-TimeW-Record-Ms",
       "Access-Control-Max-Age": "86400"
     });
     return res.end();
@@ -1438,12 +1586,17 @@ async function route(req, res) {
       mode: publicMode(),
       provider: config.provider,
       buildId: config.buildId,
+      configRevision: runtimeSettings().revision,
+      runtime: runtimeSettings(),
       capabilities: {
         ai: publicMode() === "live",
         notes: true,
         speech: ttsAvailable(),
         home: isTuyaEnabled(),
-        homeConfirmation: true
+        homeConfirmation: true,
+        immediateLight: isTuyaEnabled(),
+        undoLight: isTuyaEnabled(),
+        autoStop: Boolean(config.autoStopEnabled)
       }
     });
   }
@@ -1455,6 +1608,22 @@ async function route(req, res) {
     const result = await confirmHomeCommand(token);
     if (!result) return error(res, 410, "Подтверждение отсутствует или устарело", "confirmation_expired");
     return json(res, 200, result);
+  }
+
+  if (req.method === "POST" && pathname === "/api/v1/home/undo") {
+    const body = await jsonBody(req);
+    const token = typeof body.undoToken === "string" ? body.undoToken.trim() : "";
+    if (!token) return error(res, 400, "undoToken is required");
+    const requestKey = requestId(req, body);
+    const fingerprint = idempotencyFingerprint("home-undo", { undoToken: token });
+    const cached = await getIdempotent(requestKey, fingerprint);
+    if (cached) return json(res, cached.status, cached.body);
+    const metrics = {};
+    const result = await undoHomeCommand(token, metrics);
+    if (!result) return error(res, 410, "Действие уже нельзя отменить", "undo_expired");
+    const bodyResult = { ...result, timings: { tuyaMs: metrics.tuyaMs || 0 } };
+    await putIdempotent(requestKey, fingerprint, { status: 200, body: bodyResult });
+    return json(res, 200, bodyResult);
   }
 
   if (req.method === "GET" && pathname === "/api/v1/notes") {
@@ -1611,5 +1780,6 @@ export {
   server,
   settleBackgroundWrites,
   setStore,
-  SAFE_INSTANT_DEVICES
+  SAFE_INSTANT_DEVICES,
+  runtimeSettings
 };

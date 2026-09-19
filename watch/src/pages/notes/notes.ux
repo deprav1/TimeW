@@ -31,7 +31,7 @@
 import prompt from "@system.prompt"
 import vibrator from "@system.vibrator"
 import router from "@system.router"
-import { listNotes, deleteNote, voiceUri, query } from "../../common/api"
+import { listNotes, deleteNote, voiceUri, voiceBytes, query } from "../../common/api"
 import { recordAudio, stopRecording } from "../../common/audio"
 import { getQueued, enqueueAudio, loadQueue } from "../../common/queue"
 import { getCachedNotes, saveCachedNotes, loadCachedNotes } from "../../common/notes-cache"
@@ -151,7 +151,9 @@ export default {
       if (epoch !== self.voiceEpoch) return
       self.recording = false
       self.dictateLabel = "Думаю"
-      voiceUri(audio.uri, audio.contentType, "note", function(response) {
+      var send = audio.bytes ? voiceBytes : voiceUri
+      var source = audio.bytes || audio.uri
+      send(source, audio.contentType, "note", function(response) {
         if (epoch !== self.voiceEpoch) return
         self.setBusy(false)
         self.dictateLabel = "Надиктовать"
@@ -166,7 +168,7 @@ export default {
           return
         }
         self.errorText = messageFrom(error)
-      })
+      }, { recordedMs: audio.recordedMs })
     }, function(error) {
       if (epoch !== self.voiceEpoch) return
       self.recording = false

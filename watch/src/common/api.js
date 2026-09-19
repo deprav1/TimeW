@@ -1,7 +1,7 @@
 import fetch from "@system.fetch"
 import request from "@system.request"
 import file from "@system.file"
-import { getCached, rememberTransferMode } from "./settings"
+import { getCached, rememberTransferMode, getRecordingSettings } from "./settings"
 import { guard } from "./guard"
 import { REQUEST_TIMEOUT_MS, UPLOAD_TIMEOUT_MS } from "./config"
 
@@ -16,6 +16,14 @@ function baseUrl() {
 
 function deviceToken() {
   return getCached().deviceToken
+}
+
+function requestTimeout() {
+  return getRecordingSettings().requestTimeoutMs || REQUEST_TIMEOUT_MS
+}
+
+function uploadTimeout() {
+  return getRecordingSettings().uploadTimeoutMs || UPLOAD_TIMEOUT_MS
 }
 
 var requestCounter = 0
@@ -121,6 +129,14 @@ function handleFail(error, fail) {
   fail(error)
 }
 
+export function status(done, fail) {
+  callFetch({
+    url: baseUrl() + "/api/v1/status",
+    method: "GET",
+    header: headers()
+  }, requestTimeout(), done, fail)
+}
+
 export function query(text, done, fail, requestKey) {
   var payload = { text: text }
   var stableKey = requestKey || makeRequestKey("query")
@@ -132,7 +148,7 @@ export function query(text, done, fail, requestKey) {
     method: "POST",
     header: headers({ "Idempotency-Key": stableKey }),
     data: JSON.stringify(payload)
-  }, REQUEST_TIMEOUT_MS, done, fail)
+  }, requestTimeout(), done, fail)
 }
 
 export function listNotes(done, fail) {
@@ -140,7 +156,7 @@ export function listNotes(done, fail) {
     url: baseUrl() + "/api/v1/notes",
     method: "GET",
     header: headers()
-  }, REQUEST_TIMEOUT_MS, done, fail)
+  }, requestTimeout(), done, fail)
 }
 
 export function deleteNote(id, done, fail) {
@@ -148,7 +164,7 @@ export function deleteNote(id, done, fail) {
     url: baseUrl() + "/api/v1/notes/" + id,
     method: "DELETE",
     header: headers()
-  }, REQUEST_TIMEOUT_MS, done, fail)
+  }, requestTimeout(), done, fail)
 }
 
 function filenameFor(contentType) {
@@ -179,7 +195,7 @@ function withProvider(path, intent, preview) {
 
 // Путь A: request.upload отправляет файл по uri как multipart/form-data.
 // Шлюз принимает multipart наравне с сырым телом.
-function uploadByUri(path, uri, contentType, intent, requestKey, preview, done, fail) {
+function uploadByUri(path, uri, contentType, intent, requestKey, preview, recordedMs, done, fail) {
   // Проверено опросом рантайма: метода request.upload не существует.
   // Вызов несуществующей функции бросает исключение, поэтому проверяем явно,
   // а не полагаемся на колбэк ошибки. Путь оставлен на случай прошивки,
@@ -189,9 +205,10 @@ function uploadByUri(path, uri, contentType, intent, requestKey, preview, done, 
     return
   }
   var uploadHeaders = { "Idempotency-Key": requestKey }
+  if (recordedMs) uploadHeaders["X-TimeW-Record-Ms"] = String(Math.round(recordedMs))
   var token = deviceToken()
   if (token) uploadHeaders["X-TimeW-Device-Token"] = token
-  var settle = guard(UPLOAD_TIMEOUT_MS, function() {
+  var settle = guard(uploadTimeout(), function() {
     fail({ message: "Отправка записи не ответила" })
   })
   request.upload({
@@ -210,8 +227,8 @@ function uploadByUri(path, uri, contentType, intent, requestKey, preview, done, 
 }
 
 // Путь B: прочитать файл в память и отправить сырые байты.
-function uploadByBytes(path, uri, contentType, intent, requestKey, preview, done, fail) {
-  var settle = guard(REQUEST_TIMEOUT_MS, function() {
+function uploadByBytes(path, uri, contentType, intent, requestKey, preview, recordedMs, done, fail) {
+  var settle = guard(requestTimeout(), function() {
     fail({ message: "Не удалось прочитать запись с часов" })
   })
   file.readArrayBuffer({
@@ -232,7 +249,7 @@ function uploadByBytes(path, uri, contentType, intent, requestKey, preview, done
         fail({ message: "Ничего не записалось, попробуйте ещё раз", serverError: true })
         return
       }
-      sendAudioBytes(path, bytes, contentType, intent, requestKey, preview, done, fail)
+      sendAudioBytes(path, bytes, contentType, intent, requestKey, preview, recordedMs, done, fail)
     }),
     // Файл не прочитался — это не обрыв связи, а потеря записи: рантайм
     // вправе чистить кэш приложения. Повторять нечего, поэтому помечаем
@@ -276,7 +293,7 @@ function toBase64(buffer) {
 // а тип содержимого рантайм дополнил charset=utf-8 — то есть счёл тело
 // текстом и подставил что-то своё. Текстовые запросы с часов работают
 // надёжно, поэтому запись едет как base64: плюс треть объёма, зато доезжает.
-function sendAudioBytes(path, audio, contentType, intent, requestKey, preview, done, fail) {
+function sendAudioBytes(path, audio, contentType, intent, requestKey, preview, recordedMs, done, fail) {
   var encoded
   try {
     encoded = toBase64(audio)
@@ -284,15 +301,17 @@ function sendAudioBytes(path, audio, contentType, intent, requestKey, preview, d
     fail({ message: "Не удалось подготовить запись к отправке" })
     return
   }
+  var extra = { "Idempotency-Key": requestKey }
+  if (recordedMs) extra["X-TimeW-Record-Ms"] = String(Math.round(recordedMs))
   callFetch({
     url: baseUrl() + withProvider(path, intent, preview),
     method: "POST",
-    header: headers({ "Idempotency-Key": requestKey }),
+    header: headers(extra),
     data: JSON.stringify({
       audioBase64: encoded,
       contentType: contentType || "application/octet-stream"
     })
-  }, UPLOAD_TIMEOUT_MS, done, fail)
+  }, uploadTimeout(), done, fail)
 }
 
 // Один запрос вместо двух: шлюз распознаёт речь и сразу отвечает.
@@ -304,6 +323,12 @@ function sendAudioBytes(path, audio, contentType, intent, requestKey, preview, d
 // options.requestKey — свой ключ идемпотентности: у отложенной записи он
 // сохраняется вместе с ней, поэтому повторная досылка после сбоя связи не
 // создаёт вторую заметку.
+export function voiceBytes(bytes, contentType, intent, done, fail, options) {
+  var requestKey = (options && options.requestKey) || makeRequestKey("voice")
+  var preview = !options || options.preview !== false
+  sendAudioBytes("/api/v1/voice", bytes, contentType, intent, requestKey, preview, options && options.recordedMs, done, fail)
+}
+
 export function voiceUri(uri, contentType, intent, done, fail, options) {
   var senders = {
     upload: uploadByUri,
@@ -329,7 +354,7 @@ export function voiceUri(uri, contentType, intent, done, fail, options) {
       return
     }
     var mode = order[index]
-    senders[mode]("/api/v1/voice", uri, contentType, intent, requestKey, preview, function(response) {
+    senders[mode]("/api/v1/voice", uri, contentType, intent, requestKey, preview, options && options.recordedMs, function(response) {
       rememberTransferMode(mode)
       done(response, mode)
     }, function(error) {
@@ -358,7 +383,7 @@ export function resetDialog(done, fail) {
     method: "POST",
     header: headers(),
     data: "{}"
-  }, REQUEST_TIMEOUT_MS, done, fail)
+  }, requestTimeout(), done, fail)
 }
 
 export function confirmHome(confirmationToken, done, fail) {
@@ -367,7 +392,17 @@ export function confirmHome(confirmationToken, done, fail) {
     method: "POST",
     header: headers({ "Idempotency-Key": makeRequestKey("home-confirm") }),
     data: JSON.stringify({ confirmationToken: confirmationToken })
-  }, REQUEST_TIMEOUT_MS, done, fail)
+  }, requestTimeout(), done, fail)
+}
+
+export function undoHome(undoToken, done, fail) {
+  var key = makeRequestKey("home-undo")
+  callFetch({
+    url: baseUrl() + "/api/v1/home/undo",
+    method: "POST",
+    header: headers({ "Idempotency-Key": key }),
+    data: JSON.stringify({ undoToken: undoToken, requestId: key })
+  }, requestTimeout(), done, fail)
 }
 
 // Отчёт диагностики уходит на шлюз и попадает в его лог. Это единственный
@@ -379,5 +414,5 @@ export function sendDiagnostics(report, done, fail) {
     method: "POST",
     header: headers(),
     data: JSON.stringify(report)
-  }, REQUEST_TIMEOUT_MS, done, fail)
+  }, requestTimeout(), done, fail)
 }

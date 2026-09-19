@@ -26,6 +26,7 @@
 
     <div class="bottom-row">
       <text class="link" onclick="openNotes">заметки</text>
+      <text class="link" if="{{undoToken}}" onclick="undoLast">отменить</text>
       <text class="link" if="{{hasAnswer}}" onclick="resetDialogue">заново</text>
       <text class="link" onclick="openSettings">настр.</text>
     </div>
@@ -36,10 +37,9 @@
 import prompt from "@system.prompt"
 import vibrator from "@system.vibrator"
 import router from "@system.router"
-import { query, voiceUri, resetDialog, confirmHome } from "../../common/api"
+import { query, voiceUri, voiceBytes, status as fetchStatus, resetDialog, confirmHome, undoHome } from "../../common/api"
 import { recordAudio, stopRecording } from "../../common/audio"
-import { MAX_RECORDING_MS } from "../../common/config"
-import { loadSettings, getCached } from "../../common/settings"
+import { loadSettings, getCached, getRecordingSettings, applyRemoteRuntime } from "../../common/settings"
 import { speak } from "../../common/speech"
 import { isOnline } from "../../common/net"
 import { loadQueue, getQueued, flush } from "../../common/queue"
@@ -65,7 +65,9 @@ export default {
     recording: false,
     tickerId: 0,
     settingsReady: false,
-    lastSyncAt: 0
+    lastSyncAt: 0,
+    undoToken: "",
+    undoTimer: 0
   },
 
   onShow() {
@@ -76,6 +78,12 @@ export default {
         self.errorText = "Шлюз не настроен"
         return
       }
+      // Runtime tuning is protected by the same device token and cached for
+      // offline use. A failed refresh is intentionally silent: the last
+      // known-good values and conservative local defaults remain usable.
+      fetchStatus(function(response) {
+        if (response && response.runtime) applyRemoteRuntime(response.runtime)
+      }, function() {})
       var now = Date.now()
       if (self.lastSyncAt && now - self.lastSyncAt < 30000) return
       self.lastSyncAt = now
@@ -198,7 +206,7 @@ export default {
     self.tickerId = setInterval(function() {
       var passed = Math.round((Date.now() - started) / 1000)
       if (mode === "record") {
-        var left = Math.max(0, Math.round(MAX_RECORDING_MS / 1000) - passed)
+        var left = Math.max(0, Math.round(getRecordingSettings().maxRecordingMs / 1000) - passed)
         self.status = left > 0 ? "говорите · " + left : "заканчиваю…"
       } else {
         self.status = "думаю · " + passed
@@ -229,8 +237,8 @@ export default {
     self.errorText = ""
     self.transcript = ""
     self.talkLabel = "Готово"
-    self.result = "Нажмите, когда договорите"
-    self.status = "говорите · " + Math.round(MAX_RECORDING_MS / 1000)
+    self.result = getRecordingSettings().autoStop ? "Говорите — закончу сам" : "Нажмите, когда договорите"
+    self.status = "говорите · " + Math.round(getRecordingSettings().maxRecordingMs / 1000)
     self.startTicker("record")
 
     recordAudio(function(audio) {
@@ -238,7 +246,9 @@ export default {
       self.recording = false
       self.beginThinking()
 
-      voiceUri(audio.uri, audio.contentType, intent, function(response) {
+      var send = audio.bytes ? voiceBytes : voiceUri
+      var source = audio.bytes || audio.uri
+      send(source, audio.contentType, intent, function(response) {
         if (epoch !== self.voiceEpoch) return
         self.stopTicker()
         self.setBusy(false)
@@ -258,7 +268,7 @@ export default {
         self.status = "ошибка"
         self.errorText = messageFrom(error)
         self.updateTalkLabel()
-      })
+      }, { recordedMs: audio.recordedMs })
     }, function(error) {
       if (epoch !== self.voiceEpoch) return
       self.recording = false
@@ -277,6 +287,7 @@ export default {
     this.hasAnswer = !!response.text
     this.answerSource = response.source || response.kind || ""
     this.speechId = response.speechId || ""
+    this.setUndo(response.undoToken || "")
     this.updateTalkLabel()
     vibrator.vibrate({ mode: "short" })
     if (this.speechId && getCached().speakAnswers) {
@@ -285,8 +296,36 @@ export default {
     }
   },
 
-  // Домашняя команда исполняется только после отдельного подтверждения:
-  // расслышать «выключи свет» можно и там, где никто этого не просил.
+  setUndo(token) {
+    if (this.undoTimer) clearTimeout(this.undoTimer)
+    this.undoToken = token || ""
+    if (!this.undoToken) return
+    var self = this
+    this.undoTimer = setTimeout(function() {
+      self.undoToken = ""
+      self.undoTimer = 0
+    }, 30000)
+  },
+
+  undoLast() {
+    var self = this
+    var token = self.undoToken
+    if (!token || self.busy) return
+    self.setUndo("")
+    self.setBusy(true)
+    self.status = "возвращаю…"
+    undoHome(token, function(response) {
+      self.setBusy(false)
+      self.applyResponse(response)
+    }, function(error) {
+      self.setBusy(false)
+      self.status = "готов"
+      self.errorText = messageFrom(error)
+    })
+  },
+
+  // Этот диалог остаётся только для будущих небезопасных действий. Свет с
+  // точной комнатой сервер выполняет сразу и возвращает квитанцию + отмену.
   askHomeConfirmation(response) {
     var self = this
     prompt.showDialog({

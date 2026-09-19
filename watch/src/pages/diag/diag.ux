@@ -36,7 +36,7 @@ import file from "@system.file"
 import { loadSettings, getCached } from "../../common/settings"
 import { networkType } from "../../common/net"
 import { sendDiagnostics } from "../../common/api"
-import { recordAudio } from "../../common/audio"
+import { recordAudio, recordingCapability } from "../../common/audio"
 import { CONFIG_STAMP } from "../../common/config"
 import { VERSION_CODE } from "../../common/build-info"
 
@@ -101,6 +101,7 @@ export default {
       ],
       steps: []
     }
+    report.recordFrameEventProperty = recordingCapability().frameEventAvailable
 
     self.add("сборка часов", String(VERSION_CODE))
     report.modules.forEach(function(entry) {
@@ -190,6 +191,21 @@ export default {
     var self = this
     self.add("запись", "пробую…")
     recordAudio(function(audio) {
+      if (audio.bytes) {
+        var framed = new Uint8Array(audio.bytes)
+        var framedHead = ""
+        for (var fi = 0; fi < 8 && fi < framed.length; fi++) {
+          var fh = framed[fi].toString(16)
+          framedHead += (fh.length < 2 ? "0" + fh : fh)
+        }
+        report.recordType = audio.contentType
+        report.recordSize = framed.length
+        report.recordHead = framedHead
+        report.capture = audio.capture || recordingCapability().last
+        self.add("запись", framed.length + " байт, тип " + audio.contentType + ", автостоп " + (report.capture.stoppedBySilence ? "по паузе" : "по завершению"))
+        self.finish(report)
+        return
+      }
       report.recordUri = audio.uri
       report.recordType = audio.contentType
       file.readArrayBuffer({
@@ -207,6 +223,7 @@ export default {
           } catch (error) { head = "не прочитать" }
           report.recordSize = size
           report.recordHead = head
+          report.capture = recordingCapability().last
           self.add("запись", size + " байт, тип " + audio.contentType + ", байты " + head)
           self.finish(report)
         },
@@ -216,6 +233,7 @@ export default {
         }
       })
     }, function(error) {
+      report.capture = recordingCapability().last
       self.add("запись", "не удалась: " + ((error && error.message) || "ошибка"))
       self.finish(report)
     })

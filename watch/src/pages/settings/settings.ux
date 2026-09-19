@@ -61,7 +61,7 @@
 <script>
 import router from "@system.router"
 import fetch from "@system.fetch"
-import { loadSettings, saveSettings } from "../../common/settings"
+import { loadSettings, saveSettings, applyRemoteRuntime } from "../../common/settings"
 import { networkType } from "../../common/net"
 import { VERSION_CODE } from "../../common/build-info"
 
@@ -234,6 +234,7 @@ export default {
           return
         }
         var mode = parsed && parsed.mode ? parsed.mode : "unknown"
+        if (parsed && parsed.runtime) applyRemoteRuntime(parsed.runtime)
         // Главная строка проверки: видно, каким путём часы дошли до шлюза.
         self.checkResult = "связь есть (" + self.checkVia + "), режим " + mode
         // Озвучка требует отдельного ключа на шлюзе. Без этой строки
