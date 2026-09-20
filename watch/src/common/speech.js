@@ -232,7 +232,7 @@ export function lastSpeechReport() {
     transport: speechReport.transport, headerShape: speechReport.headerShape,
     tokenPresent: speechReport.tokenPresent, phase: speechReport.phase,
     code: speechReport.code, attempts: speechReport.attempts,
-    fallback: speechReport.fallback,
+    fallback: speechReport.fallback, bits: speechBits(), decoder: base64DecoderName(),
     timings: {
       fetchMs: speechReport.timings.fetchMs, decodeMs: speechReport.timings.decodeMs,
       writeMs: speechReport.timings.writeMs, bytes: speechReport.timings.bytes
@@ -416,6 +416,17 @@ function downloadThenBytes(url, onUri, onFail) {
 var FALLBACK_RATE = 8000
 var MAX_BASE64_CHARS = 300000
 
+// Восемь бит на отсчёт вдвое легче шестнадцати — это вдвое меньше и
+// времени на передачу, и работы на разбор. Для речи потеря почти не
+// слышна. Но проиграет ли рантайм такой файл, заранее неизвестно, поэтому
+// при первом же отказе воспроизведения переходим на 16 бит и больше
+// восемь не просим.
+var bitsUnsupported = false
+
+function speechBits() {
+  return bitsUnsupported ? 16 : 8
+}
+
 var B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 var B64_LOOKUP = null
 
@@ -429,7 +440,34 @@ function base64Lookup() {
   return B64_LOOKUP
 }
 
+// Рантайм может уметь разбирать base64 сам. Свой цикл на 70 тысячах
+// символов стоил 1150 мс по отчёту с устройства, и это время человек стоит
+// молча. Наличие atob проверяется один раз и попадает в диагностику.
+var nativeDecoder = null
+
+export function base64DecoderName() {
+  if (nativeDecoder === null) {
+    try { nativeDecoder = typeof atob === "function" } catch (error) { nativeDecoder = false }
+  }
+  return nativeDecoder ? "atob" : "свой"
+}
+
+function decodeNative(text) {
+  var binary = atob(text)
+  var out = new Uint8Array(binary.length)
+  for (var i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i) & 255
+  return out.buffer
+}
+
 function decodeBase64(text) {
+  if (base64DecoderName() === "atob") {
+    try {
+      return decodeNative(text)
+    } catch (error) {
+      // Один отказ — и больше не пробуем: свой цикл медленнее, но работает.
+      nativeDecoder = false
+    }
+  }
   var table = base64Lookup()
   var source = String(text || "")
   // Размер считается заранее, а не подрезается копией в конце: лишний
@@ -460,7 +498,8 @@ function decodeBase64(text) {
 }
 
 function bytesUrl(url) {
-  return url + (url.indexOf("?") >= 0 ? "&" : "?") + "as=base64&rate=" + FALLBACK_RATE
+  return url + (url.indexOf("?") >= 0 ? "&" : "?") +
+    "as=base64&rate=" + FALLBACK_RATE + "&bits=" + speechBits()
 }
 
 function fetchAudioBytes(url, onUri, onFail) {
@@ -587,7 +626,16 @@ function writeAudioFile(buffer, onUri, onFail) {
 
 function download(speechId, done, fail) {
   fetchAudio(speechUrl(speechId), function(uri) {
-    play(uri, done, fail)
+    play(uri, done, function(error) {
+      // Файл доехал, но не проигрался. Самое вероятное — рантайм не принял
+      // 8 бит на отсчёт; переспрашиваем в 16 и запоминаем на сессию.
+      if (!bitsUnsupported) {
+        bitsUnsupported = true
+        download(speechId, done, fail)
+        return
+      }
+      fail(error)
+    })
   }, fail)
 }
 
@@ -608,6 +656,11 @@ export function speakTest(done, fail) {
         done({ volume: value, uri: uri, downloadedMs: downloadedMs, ms: Date.now() - startedAt,
           started: lastPlayback.started, speech: lastSpeechReport() })
       }, function(error) {
+        if (!bitsUnsupported) {
+          bitsUnsupported = true
+          speakTest(done, fail)
+          return
+        }
         fail({ message: (error && error.message) || "не проигралось", volume: value,
           uri: uri, downloadedMs: downloadedMs, ms: Date.now() - startedAt,
           speech: lastSpeechReport() })
@@ -625,6 +678,7 @@ export function speakTest(done, fail) {
 // живёт до перезапуска приложения, а в тестах каждый случай свой.
 export function resetSpeechTransport() {
   downloadUnusable = false
+  bitsUnsupported = false
 }
 
 export function stopSpeaking() {

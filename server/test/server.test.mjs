@@ -48,6 +48,7 @@ const {
   resetDialogHistory,
   settleBackgroundWrites,
   resetRateLimit,
+  resetSpeechCache,
   resetSpeechRegistry,
   resetTuyaTokenCache,
   server
@@ -1577,6 +1578,7 @@ test("POST /api/v1/speak with a mock TTS provider streams back audio/mpeg", asyn
 // ответом модели. Отдельная ручка синтезирует фиксированную фразу и ничего не
 // принимает снаружи, кроме формата.
 test("GET /api/v1/speak/test synthesizes a fixed phrase and takes no text from the caller", async (t) => {
+  resetSpeechCache();
   const originalFormat = config.ttsFormat;
   config.ttsFormat = "mp3";
   t.after(() => { config.ttsFormat = originalFormat; });
@@ -1604,6 +1606,7 @@ test("GET /api/v1/speak/test synthesizes a fixed phrase and takes no text from t
 // поэтому те же ручки умеют отдать звук строкой base64, а заодно проредить
 // его до 8 кГц — на часах каждый лишний килобайт лежит в куче JS.
 test("GET /api/v1/speak/test?as=base64 отдаёт тот же звук строкой", async (t) => {
+  resetSpeechCache();
   const originalFormat = config.ttsFormat;
   config.ttsFormat = "mp3";
   t.after(() => { config.ttsFormat = originalFormat; });
@@ -1627,6 +1630,7 @@ test("GET /api/v1/speak/test?as=base64 отдаёт тот же звук стр�
 // Прореживание касается только того, что часам и правда тяжело: моно PCM
 // 16 бит. Чужой контейнер (mp3) остаётся как есть, иначе испортили бы файл.
 test("rate прореживает WAV втрое и не трогает другие форматы", async (t) => {
+  resetSpeechCache();
   const originalFormat = config.ttsFormat;
   config.ttsFormat = "mp3";
   t.after(() => { config.ttsFormat = originalFormat; });
@@ -1661,6 +1665,43 @@ test("rate прореживает WAV втрое и не трогает друг
       assert.equal(audio.readUInt32LE(24), 8000, "частота в заголовке пересчитана");
       assert.ok(audio.length < wav.length / 2.5, `ожидали втрое меньше, вышло ${audio.length} против ${wav.length}`);
       assert.equal(audio.toString("ascii", 0, 4), "RIFF", "файл остался WAV");
+    }
+  );
+});
+
+// Отчёт с устройства: 52 КБ звука ехали на часы 4,7 секунды и ещё 1,15
+// секунды раскладывались из base64. Оба слагаемых пропорциональны объёму,
+// поэтому речь отдаётся 8 битами на отсчёт — вдвое легче, и для голоса
+// потеря почти не слышна.
+test("bits=8 отдаёт вдвое меньший WAV и правит заголовок", async (t) => {
+  resetSpeechCache();
+  const originalFormat = config.ttsFormat;
+  config.ttsFormat = "mp3";
+  t.after(() => { config.ttsFormat = originalFormat; });
+  const pcm = Buffer.alloc(8000 * 2);
+  for (let i = 0; i < 8000; i++) pcm.writeInt16LE(((i % 64) - 32) * 500, i * 2);
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0); header.writeUInt32LE(36 + pcm.length, 4); header.write("WAVE", 8);
+  header.write("fmt ", 12); header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22); header.writeUInt32LE(8000, 24); header.writeUInt32LE(16000, 28);
+  header.writeUInt16LE(2, 32); header.writeUInt16LE(16, 34); header.write("data", 36);
+  header.writeUInt32LE(pcm.length, 40);
+  const wav = Buffer.concat([header, pcm]);
+
+  await withMockOpenAI(
+    async (req, res) => {
+      res.writeHead(200, { "Content-Type": "audio/wav" });
+      res.end(wav);
+    },
+    async () => {
+      const res = await fetch(`${base}/api/v1/speak/test?format=wav&as=base64&bits=8`);
+      assert.equal(res.status, 200);
+      const audio = Buffer.from((await res.json()).audioBase64, "base64");
+      assert.equal(audio.readUInt16LE(34), 8, "бит на отсчёт");
+      assert.equal(audio.readUInt16LE(32), 1, "выравнивание блока");
+      assert.equal(audio.readUInt32LE(28), 8000, "байт в секунду");
+      assert.equal(audio.length, 44 + 8000, "ровно вдвое меньше данных");
+      assert.equal(audio.toString("ascii", 0, 4), "RIFF");
     }
   );
 });

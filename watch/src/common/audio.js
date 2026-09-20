@@ -443,6 +443,90 @@ export function probeFrames(done) {
   }, AUDIO_RELEASE_MS)
 }
 
+// Перебор форм вызова record.start.
+//
+// Код 202 рантайм отдаёт и на неверные параметры, и — как выяснилось — на
+// что-то ещё: на устройстве им отвечает даже вызов с одним duration, тот
+// самый, который в эмуляторе работает. Догадками это закрыть не вышло уже
+// трижды, поэтому спрашиваем прямо: пробуем формы по очереди и записываем
+// код каждой. Первая, которая стартует, и есть рабочая — её сразу
+// останавливаем, запись никуда не идёт.
+//
+// Формы подобраны так, чтобы развести причины: пустая проверяет сам доступ
+// к микрофону (нет параметров — нет и неверных), остальные добавляют по
+// одному подозреваемому.
+var RECORD_SHAPES = [
+  { name: "пусто", options: {} },
+  { name: "duration", options: { duration: 5000 } },
+  { name: "format=amr", options: { format: "amr" } },
+  { name: "format=aac", options: { format: "aac" } },
+  { name: "format=wav", options: { format: "wav" } },
+  { name: "format=mp3", options: { format: "mp3" } },
+  { name: "sampleRate", options: { sampleRate: 8000 } }
+]
+
+export function probeRecordShapes(done) {
+  var results = []
+  stopSpeaking()
+
+  function next(index) {
+    if (index >= RECORD_SHAPES.length) {
+      done(results)
+      return
+    }
+    var shape = RECORD_SHAPES[index]
+    var settled = false
+    var entry = { name: shape.name, started: false, code: null, error: "", ms: 0 }
+    var startedAt = Date.now()
+
+    function finish() {
+      if (settled) return
+      settled = true
+      entry.ms = Date.now() - startedAt
+      try { record.stop() } catch (error) {}
+      active = null
+      results.push(entry)
+      // Пауза между попытками: рантайм отпускает микрофон не мгновенно, и
+      // без неё следующая форма получила бы чужой отказ.
+      setTimeout(function() { next(index + 1) }, AUDIO_RELEASE_MS)
+    }
+
+    // Старт без отказа в течение секунды считаем успехом: success приходит
+    // только по окончании записи, а ждать её полностью здесь незачем.
+    var patience = setTimeout(function() {
+      if (settled) return
+      entry.started = true
+      finish()
+    }, 1000)
+
+    var request = {
+      success: function() {
+        clearTimeout(patience)
+        entry.started = true
+        finish()
+      },
+      fail: function(data, code) {
+        clearTimeout(patience)
+        entry.code = typeof code === "number" ? code : null
+        entry.error = messageForCode(code) || (data && data.message) || "отказ"
+        finish()
+      }
+    }
+    Object.keys(shape.options).forEach(function(key) { request[key] = shape.options[key] })
+
+    active = { mode: "probe", cancel: function() { clearTimeout(patience); finish() } }
+    try {
+      record.start(request)
+    } catch (error) {
+      clearTimeout(patience)
+      entry.error = "исключение при вызове"
+      finish()
+    }
+  }
+
+  next(0)
+}
+
 export function recordingCapability() {
   return {
     frameEventAvailable: hasFrameEvents(),

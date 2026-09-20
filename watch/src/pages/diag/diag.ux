@@ -41,7 +41,7 @@ import volume from "@system.volume"
 import { loadSettings, getCached } from "../../common/settings"
 import { networkType } from "../../common/net"
 import { sendDiagnostics, lastVoiceStats } from "../../common/api"
-import { recordAudio, recordingCapability, probeFrames } from "../../common/audio"
+import { recordAudio, recordingCapability, probeFrames, probeRecordShapes } from "../../common/audio"
 import { lastPlaybackReport, lastSpeechReport, speakTest } from "../../common/speech"
 import { CONFIG_STAMP } from "../../common/config"
 import { VERSION_CODE } from "../../common/build-info"
@@ -246,7 +246,8 @@ export default {
         transport: lastSpeechReport().transport, headerShape: lastSpeechReport().headerShape,
         phase: lastSpeechReport().phase, code: lastSpeechReport().code,
         attempts: lastSpeechReport().attempts, fallback: lastSpeechReport().fallback,
-        timings: lastSpeechReport().timings }
+        timings: lastSpeechReport().timings, bits: lastSpeechReport().bits,
+        decoder: lastSpeechReport().decoder }
       report.playback = lastPlaybackReport()
       self.add("громкость", self.volumeText(result.volume))
       var speechTimings = lastSpeechReport().timings
@@ -262,7 +263,8 @@ export default {
         transport: lastSpeechReport().transport, headerShape: lastSpeechReport().headerShape,
         phase: lastSpeechReport().phase, runtimeCode: lastSpeechReport().code,
         attempts: lastSpeechReport().attempts, fallback: lastSpeechReport().fallback,
-        timings: lastSpeechReport().timings
+        timings: lastSpeechReport().timings, bits: lastSpeechReport().bits,
+        decoder: lastSpeechReport().decoder
       }
       report.playback = lastPlaybackReport()
       self.add("громкость", self.volumeText(error.volume))
@@ -297,7 +299,18 @@ export default {
         ? result.frames + " кадров, " + result.bytes + " байт — автоотправка возможна"
         : (result.error || "кадров нет") + (result.code ? " (код " + result.code + ")" : "")
       self.add("кадры", verdict)
-      next()
+      // Если кадры не пришли из-за 202, следующий вопрос — а стартует ли
+      // запись вообще хоть в какой-нибудь форме.
+      self.progressText = "перебираю формы записи"
+      probeRecordShapes(function(shapes) {
+        if (self.cancelled) return
+        report.recordShapes = shapes
+        var working = shapes.filter(function(entry) { return entry.started })
+        self.add("формы записи", working.length
+          ? "стартует: " + working.map(function(e) { return e.name }).join(", ")
+          : "ни одна не стартует (" + shapes.map(function(e) { return e.name + ":" + (e.code || "?") }).join(" ") + ")")
+        next()
+      })
     })
   },
 

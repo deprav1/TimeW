@@ -942,6 +942,12 @@ const SPEECH_PREFIX = "speech:";
 const speechAudioCache = new Map();
 const SPEECH_AUDIO_CACHE_MAX = 4;
 
+// Только для тестов: фраза проверки звука кэшируется на весь процесс, и без
+// сброса следующий тест получил бы звук предыдущего.
+export function resetSpeechCache() {
+  speechAudioCache.clear();
+}
+
 function cacheSpeechAudio(id, speech) {
   speechAudioCache.set(id, speech);
   while (speechAudioCache.size > SPEECH_AUDIO_CACHE_MAX) {
@@ -1666,6 +1672,38 @@ function decimateWav(wav, targetRate) {
   return pcmToWav(out, Math.round(sourceRate / factor));
 }
 
+// Речь на часах переживает 8 бит на отсчёт, а весит вдвое меньше. Отчёт с
+// устройства: 52 КБ звука ехали 4,7 секунды и ещё 1,15 секунды
+// раскладывались из base64 — оба слагаемых пропорциональны объёму.
+// Для речи потеря динамического диапазона почти не слышна: это тот же
+// приём, что в телефонии.
+function to8bit(wav) {
+  if (wav.length < 44 || wav.toString("ascii", 0, 4) !== "RIFF") return wav;
+  if (wav.readUInt16LE(34) !== 16 || wav.readUInt16LE(22) !== 1) return wav;
+  const rate = wav.readUInt32LE(24);
+  const pcm = wav.subarray(44);
+  const samples = Math.floor(pcm.length / 2);
+  const out = Buffer.alloc(44 + samples);
+  out.write("RIFF", 0);
+  out.writeUInt32LE(36 + samples, 4);
+  out.write("WAVE", 8);
+  out.write("fmt ", 12);
+  out.writeUInt32LE(16, 16);
+  out.writeUInt16LE(1, 20);
+  out.writeUInt16LE(1, 22);
+  out.writeUInt32LE(rate, 24);
+  out.writeUInt32LE(rate, 28);
+  out.writeUInt16LE(1, 32);
+  out.writeUInt16LE(8, 34);
+  out.write("data", 36);
+  out.writeUInt32LE(samples, 40);
+  for (let i = 0; i < samples; i++) {
+    // 8-битный WAV хранит отсчёты без знака, со смещением в середину шкалы.
+    out[44 + i] = ((pcm.readInt16LE(i * 2) >> 8) + 128) & 255;
+  }
+  return out;
+}
+
 // Максимум, который часам безопасно держать в памяти: 160 КБ звука дают
 // около 213 тысяч символов base64. Всё, что больше, — обрезается по границе
 // сэмпла, и об этом честно сообщается полем truncated.
@@ -1676,6 +1714,7 @@ function sendAudioAs(req, res, speech) {
   if (params.get("as") !== "base64") return sendAudio(res, speech.audio, speech.contentType);
   const rate = Number(params.get("rate")) || 0;
   let audio = rate ? decimateWav(speech.audio, rate) : speech.audio;
+  if (params.get("bits") === "8") audio = to8bit(audio);
   let truncated = false;
   if (audio.length > SPEECH_BASE64_LIMIT) {
     const keep = 44 + Math.floor((SPEECH_BASE64_LIMIT - 44) / 2) * 2;
