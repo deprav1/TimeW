@@ -95,7 +95,13 @@ const config = {
   // голосовому вводу. Выключается явным AUTO_STOP_ENABLED=0 на случай
   // прошивки, которая не отдаёт кадры: там часы сами откатятся на файловый
   // путь, но лишнюю попытку можно и сэкономить.
-  autoStopEnabled: !["0", "false", "off"].includes(String(env.AUTO_STOP_ENABLED || "").toLowerCase()),
+  // Автостоп по паузе снова выключен по умолчанию. Он единственный режим,
+  // который держит всю запись кадрами PCM в куче JS, а часы у нас как раз
+  // зависают от нехватки памяти. К тому же на этой прошивке он всё равно
+  // недоступен: record.start отвечает 202 на любую форму вызова, включая
+  // пустую. Включать обратно — AUTO_STOP_ENABLED=1, и только после того,
+  // как микрофон вообще заработает.
+  autoStopEnabled: ["1", "true", "on"].includes(String(env.AUTO_STOP_ENABLED || "").toLowerCase()),
   runtimeConfigRevision: env.TIMEW_CONFIG_REVISION || "voice-1",
   ttsFormat: env.TTS_FORMAT || (env.TTS_PROVIDER === "gemini" || (!env.TTS_PROVIDER && env.AI_PROVIDER === "gemini") ? "wav" : "mp3")
 };
@@ -1704,10 +1710,19 @@ function to8bit(wav) {
   return out;
 }
 
-// Максимум, который часам безопасно держать в памяти: 160 КБ звука дают
-// около 213 тысяч символов base64. Всё, что больше, — обрезается по границе
-// сэмпла, и об этом честно сообщается полем truncated.
-const SPEECH_BASE64_LIMIT = 160 * 1024;
+// Максимум, который часам безопасно держать в памяти.
+//
+// Считается так: строка base64 весит на треть больше самого звука, и в
+// момент разбора в куче лежат обе. 160 КБ давали пик около 373 КБ — ровно
+// тот порядок, на котором приложение уже умирало (320 КБ PCM плюс base64,
+// см. vela-notes). Часы после этого зависали целиком, а не просто теряли
+// звук.
+//
+// 64 КБ дают пик около 150 КБ и восемь секунд речи при 8 кГц. Ответ
+// ограничен двумя предложениями, так что в норме до потолка не доходит;
+// что не влезло — обрезается по границе отсчёта, и об этом честно
+// сообщается полем truncated.
+const SPEECH_BASE64_LIMIT = 64 * 1024;
 
 function sendAudioAs(req, res, speech) {
   const params = new URL(req.url, "http://localhost").searchParams;
@@ -1717,7 +1732,10 @@ function sendAudioAs(req, res, speech) {
   if (params.get("bits") === "8") audio = to8bit(audio);
   let truncated = false;
   if (audio.length > SPEECH_BASE64_LIMIT) {
-    const keep = 44 + Math.floor((SPEECH_BASE64_LIMIT - 44) / 2) * 2;
+    // Граница отсчёта зависит от разрядности: у восьмибитного звука каждый
+    // байт — целый отсчёт, у шестнадцатибитного резать можно только по два.
+    const step = audio.readUInt16LE(34) === 8 ? 1 : 2;
+    const keep = 44 + Math.floor((SPEECH_BASE64_LIMIT - 44) / step) * step;
     audio = Buffer.concat([audio.subarray(0, 44), audio.subarray(44, keep)]);
     audio.writeUInt32LE(audio.length - 8, 4);
     audio.writeUInt32LE(audio.length - 44, 40);

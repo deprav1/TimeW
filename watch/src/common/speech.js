@@ -414,7 +414,10 @@ function downloadThenBytes(url, onUri, onFail) {
 // байт в куче JS, а документация @system.file предупреждает про «memory
 // overload and application crashes» — на записи мы это уже ловили.
 var FALLBACK_RATE = 8000
-var MAX_BASE64_CHARS = 300000
+// Согласовано с потолком шлюза (64 КБ звука): 87 тысяч символов плюс
+// запас. Всё, что крупнее, — это не «длинный ответ», а признак того, что
+// шлюз отдал не то, и держать такое в куче опаснее, чем промолчать.
+var MAX_BASE64_CHARS = 96000
 
 // Восемь бит на отсчёт вдвое легче шестнадцати — это вдвое меньше и
 // времени на передачу, и работы на разбор. Для речи потеря почти не
@@ -555,6 +558,8 @@ function fetchAudioBytes(url, onUri, onFail) {
         // Строка больше не нужна, а весит столько же, сколько сам звук.
         // Отпускаем её до записи файла, чтобы пик в куче был один, а не два.
         body.audioBase64 = null
+        body = null
+        releaseMemory()
         writeAudioFile(buffer, onUri, onFail)
       }),
       fail: settle(function(error, code) {
@@ -568,6 +573,17 @@ function fetchAudioBytes(url, onUri, onFail) {
       speechReport.fallback = "fetch-threw"
       onFail(speechFailure(null, "fallback-failed"))
     })()
+  }
+}
+
+// Документация Vela называет runGC точечным средством и прямо советует его
+// после крупных операций с памятью. Звук — как раз такая: в куче только что
+// лежали строка и буфер целиком.
+function releaseMemory() {
+  try {
+    if (typeof global !== "undefined" && global && typeof global.runGC === "function") global.runGC()
+  } catch (error) {
+    // Нет так нет: это подсказка сборщику, а не обязательный шаг.
   }
 }
 
@@ -595,6 +611,9 @@ function writeAudioFile(buffer, onUri, onFail) {
         success: settle(function() {
           if (!currentEpoch(epoch)) return
           speechReport.timings.writeMs = Date.now() - writeStartedAt
+          // Файл на диске, буфер в куче больше не нужен.
+          buffer = null
+          releaseMemory()
           speechReport.fallback = "ok"
           speechReport.transport = "fetch-base64"
           onUri(uri)

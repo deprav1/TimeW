@@ -379,14 +379,25 @@ function sendAudioBytes(path, audio, contentType, intent, requestKey, preview, r
   }
   var extra = { "Idempotency-Key": requestKey }
   if (recordedMs) extra["X-TimeW-Record-Ms"] = String(Math.round(recordedMs))
+  var payload = JSON.stringify({
+    audioBase64: encoded,
+    contentType: contentType || "application/octet-stream"
+  })
+  // Строка base64 уже скопирована в тело запроса, а весит столько же,
+  // сколько сама запись. Отпускаем её здесь, не дожидаясь ответа шлюза:
+  // документация Vela советует runGC ровно после таких операций, а часы у
+  // нас зависают именно на пиках памяти.
+  encoded = null
+  try {
+    if (typeof global !== "undefined" && global && typeof global.runGC === "function") global.runGC()
+  } catch (error) {
+    // Подсказка сборщику, не обязательный шаг.
+  }
   callFetch({
     url: baseUrl() + withProvider(path, intent, preview),
     method: "POST",
     header: headers(extra),
-    data: JSON.stringify({
-      audioBase64: encoded,
-      contentType: contentType || "application/octet-stream"
-    })
+    data: payload
   }, uploadTimeout(), done, fail)
 }
 

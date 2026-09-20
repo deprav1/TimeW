@@ -51,7 +51,7 @@ Access-Control-Max-Age: 86400
 эффективный режим и флаги возможностей без ключей и других секретов:
 
 ```json
-{"ok":true,"service":"timew-gateway","mode":"demo","provider":"mock","buildId":"local","configRevision":"voice-1","runtime":{"revision":"voice-1","maxRecordingMs":10000,"silenceThreshold":450,"silenceDurationMs":1000,"speechGraceMs":900,"frameSize":2048,"requestTimeoutMs":35000,"uploadTimeoutMs":60000,"ttsFormat":"mp3","autoStop":true,"speechTransport":"bytes","capabilities":{"frameRecording":"probe","immediateLight":false,"undoLight":false}},"capabilities":{"ai":false,"notes":true,"speech":false,"home":false,"homeConfirmation":false,"immediateLight":false,"undoLight":false,"autoStop":true}}
+{"ok":true,"service":"timew-gateway","mode":"demo","provider":"mock","buildId":"local","configRevision":"voice-1","runtime":{"revision":"voice-1","maxRecordingMs":10000,"silenceThreshold":450,"silenceDurationMs":1000,"speechGraceMs":900,"frameSize":2048,"requestTimeoutMs":35000,"uploadTimeoutMs":60000,"ttsFormat":"mp3","autoStop":false,"speechTransport":"bytes","capabilities":{"frameRecording":"probe","immediateLight":false,"undoLight":false}},"capabilities":{"ai":false,"notes":true,"speech":false,"home":false,"homeConfirmation":false,"immediateLight":false,"undoLight":false,"autoStop":false}}
 ```
 
 `runtime.speechTransport` — каким способом часам забирать озвучку.
@@ -65,8 +65,10 @@ Xiaomi Watch S5 это единственный работающий путь �
 
 `runtime.autoStop` — разрешение часам использовать потоковый режим записи с
 автостопом по паузе, то есть отправку вопроса сразу, как человек замолчал.
-**По умолчанию `true`**, выключается явным `AUTO_STOP_ENABLED=0`. Цена
-известна: в этом режиме `@system.record`
+**По умолчанию `false`**, включается явным `AUTO_STOP_ENABLED=1`. Он был
+включён по умолчанию ровно один день: это единственный режим, который держит
+всю запись кадрами PCM в куче JS, а часы на устройстве зависали от нехватки
+памяти. Цена известна: в этом режиме `@system.record`
 не отдаёт файл (документированное поведение при заданном `frameSize`), поэтому
 вся запись держится в памяти часов. Включается явным `AUTO_STOP_ENABLED=1` и
 только на прошивке, где это проверено на устройстве. Часы трактуют любое

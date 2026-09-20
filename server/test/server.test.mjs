@@ -157,9 +157,10 @@ test("GET /api/v1/status is protected and reports capabilities without secrets",
     assert.equal(body.capabilities.notes, true);
     assert.equal(body.capabilities.homeConfirmation, false);
     assert.equal(body.capabilities.immediateLight, false);
-    // Автостоп по паузе включён по умолчанию: без него человек договаривает
-    // и ждёт, пока истекут десять секунд записи.
-    assert.equal(body.runtime.autoStop, true);
+    // Автостоп снова выключен по умолчанию: это единственный режим, который
+    // держит всю запись кадрами PCM в куче JS, а часы зависают от нехватки
+    // памяти. Включается явным AUTO_STOP_ENABLED=1.
+    assert.equal(body.runtime.autoStop, false);
     assert.equal(body.runtime.speechTransport, "bytes");
     assert.ok(body.runtime.revision);
     assert.equal("apiKey" in body, false);
