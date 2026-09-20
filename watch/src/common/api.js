@@ -84,6 +84,9 @@ function statusFrom(response) {
 }
 
 function messageForStatus(status) {
+  // Коды libcurl, а не HTTP: рантайм отдаёт их в том же поле.
+  if (status === 6) return "Часы не нашли адрес шлюза — проверьте сеть"
+  if (status === 35) return "Часы не доверяют сертификату шлюза"
   if (status === 401) return "Неверный токен устройства. Проверьте настройки"
   if (status === 429) return "Слишком много запросов, подождите немного"
   if (status === 502 || status === 503 || status === 504) return "AI сейчас недоступен, попробуйте позже"
@@ -135,17 +138,47 @@ function handleResponse(response, done, fail) {
 
 // Единая обёртка вызова @system.fetch со сторожевым таймером: если модуль
 // промолчит, запрос завершится понятной ошибкой, а не вечным ожиданием.
+// Коды рантайма совпадают с кодами libcurl: 6 — имя не разрешилось,
+// 35 — не удалось договориться по TLS, 28 — истекло время. Из них
+// повторять стоит только 6: DNS на часах отваливается пачками и так же
+// пачками возвращается — в отчёте с устройства все семь запросов подряд
+// упали за 110–341 мс с кодом 6, а отчёт, ушедший следом, прошёл.
+//
+// Повтор безопасен: каждый POST несёт Idempotency-Key, и шлюз отдаёт на
+// повтор тот же ответ, а не заводит вторую заметку.
+var DNS_FAILURE = 6
+var RETRY_DELAY_MS = 700
+
 function callFetch(options, timeoutMs, done, fail) {
+  var retried = false
   var settle = guard(timeoutMs, function() {
     fail({ message: "Шлюз не ответил вовремя" })
   })
-  options.success = settle(function(response) { handleResponse(response, done, fail) })
-  options.fail = settle(function(error) { handleFail(error, fail) })
-  try {
-    fetch.fetch(options)
-  } catch (error) {
-    settle(function() { fail({ message: "Не удалось начать запрос к шлюзу" }) })()
+
+  function send() {
+    options.success = settle(function(response) { handleResponse(response, done, fail) })
+    options.fail = settle(function(error) {
+      if (!retried && statusFrom(error) === DNS_FAILURE) {
+        retried = true
+        // Сторож ещё идёт: вторая попытка живёт в том же окне ожидания,
+        // и человек видит не ошибку, а чуть более долгий ответ.
+        if (settle.cancel) settle.cancel()
+        settle = guard(timeoutMs, function() {
+          fail({ message: "Шлюз не ответил вовремя" })
+        })
+        setTimeout(send, RETRY_DELAY_MS)
+        return
+      }
+      handleFail(error, fail)
+    })
+    try {
+      fetch.fetch(options)
+    } catch (error) {
+      settle(function() { fail({ message: "Не удалось начать запрос к шлюзу" }) })()
+    }
   }
+
+  send()
 }
 
 function handleFail(error, fail) {

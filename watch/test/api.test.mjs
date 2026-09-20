@@ -51,6 +51,32 @@ function lastCall() {
   return fetchModule.calls[fetchModule.calls.length - 1];
 }
 
+// Отчёт с устройства: семь запросов подряд упали за 110–341 мс с кодом 6 —
+// это «имя не разрешилось», DNS часов отваливается пачками. Отчёт, ушедший
+// следом, прошёл, то есть проблема живёт секунды. Одна повторная попытка
+// превращает её из ошибки в чуть более долгий ответ.
+test("отказ DNS повторяется один раз, а не сообщается ошибкой", async () => {
+  await ready();
+  fetchModule.scripted.push({ error: { code: 6, message: "could not resolve host" } });
+  fetchModule.scripted.push(ok({ kind: "ai", text: "ответ со второй попытки" }));
+  const startedAt = Date.now();
+  const body = await new Promise((done, fail) => query("вопрос", done, fail));
+  assert.equal(body.text, "ответ со второй попытки");
+  assert.equal(fetchModule.calls.length, 2, "ровно две попытки, не больше");
+  assert.ok(Date.now() - startedAt < 4000, `ждали ${Date.now() - startedAt} мс`);
+});
+
+// Но не бесконечно: если имя не разрешается и со второй попытки, человек
+// должен узнать причину, а не смотреть на бесконечное ожидание.
+test("второй отказ DNS доходит до человека понятным сообщением", async () => {
+  await ready();
+  fetchModule.scripted.push({ error: { code: 6, message: "could not resolve host" } });
+  fetchModule.scripted.push({ error: { code: 6, message: "could not resolve host" } });
+  const error = await new Promise((resolve) => query("вопрос", () => resolve(null), resolve));
+  assert.match(error.message, /не нашли адрес|сет/i);
+  assert.equal(fetchModule.calls.length, 2);
+});
+
 test("текстовый запрос уходит с токеном и ключом идемпотентности", async () => {
   await ready();
   fetchModule.scripted.push(ok({ kind: "ai", text: "ответ" }));
