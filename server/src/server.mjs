@@ -1877,8 +1877,22 @@ async function route(req, res) {
     if (!ttsAvailable()) return error(res, 503, "Синтез речи не настроен на шлюзе", "tts_unavailable");
     const requestedFormat = url.searchParams.get("format") || "";
     const startedAt = Date.now();
-    const speech = await synthesizeSpeech(SPEECH_TEST_PHRASE, requestedFormat);
-    console.log(`tts requestId=speak-test provider=${Date.now() - startedAt} bytes=${speech.audio.length} total=${Date.now() - startedAt}`);
+    // Фраза фиксированная, значит и звук всегда один и тот же: синтезировать
+    // его заново на каждую диагностику — это три секунды, которые попадают в
+    // отчёт и выглядят как медленная доставка. Отчёт должен мерить дорогу до
+    // часов, а не работу провайдера.
+    const cacheKey = "speak-test:" + (requestedFormat || "default");
+    let speech = speechAudioCache.get(cacheKey);
+    if (speech) {
+      speech = await Promise.resolve(speech).catch(() => null);
+    }
+    if (!speech) {
+      const work = synthesizeSpeech(SPEECH_TEST_PHRASE, requestedFormat);
+      speechAudioCache.set(cacheKey, work);
+      speech = await work;
+      cacheSpeechAudio(cacheKey, speech);
+    }
+    console.log(`tts requestId=speak-test bytes=${speech.audio.length} total=${Date.now() - startedAt}`);
     return sendAudioAs(req, res, speech);
   }
   const speechIdMatch = pathname.match(/^\/api\/v1\/speak\/([^/]+)$/);
