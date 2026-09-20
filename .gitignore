@@ -16,3 +16,4 @@ deno.lock
 deno.txt
 node_modules/
 watch/src/common/build-info.js
+watch/sign/
