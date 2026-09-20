@@ -73,26 +73,25 @@ test("по умолчанию запись идёт файловым путём,
   assert.equal(result.uri, "internal://cache/rec-default.opus");
 });
 
-test("отказ параметров записи проходит через минимальный Opus и затем bare fallback", async () => {
+// Перебор форм вызова на устройстве показал: 202 приходит на любую из них,
+// включая вызов вообще без параметров, и приходит за две миллисекунды.
+// Подбирать нечего — закрыт сам доступ к микрофону. Поэтому одна попытка,
+// а не три: три быстрых старта микрофона на каждое нажатие — это то, после
+// чего часы уходили в чёрный экран.
+test("отказ доступа к микрофону не превращается в перебор вариантов", async () => {
   resetAll();
   await disableAutoStop();
   const calls = [];
   const originalStart = record.start;
   record.start = (options) => {
     calls.push(options);
-    setTimeout(() => {
-      if (calls.length < 3) options.fail && options.fail({ message: "unsupported options" }, 202);
-      else options.success && options.success({ uri: "internal://cache/minimal.opus" });
-    }, 0);
+    setTimeout(() => options.fail && options.fail({ message: "denied" }, 202), 0);
   };
-  const result = await new Promise((resolve, reject) => recordAudio(resolve, reject));
+  const error = await new Promise((resolve) => recordAudio(() => resolve(null), resolve));
   record.start = originalStart;
-  assert.equal(calls.length, 3);
-  assert.equal(calls[0].format, "opus");
-  assert.equal(calls[1].format, "opus");
-  assert.equal(calls[1].sampleRate, undefined, "второй путь не должен притворяться полным набором параметров");
-  assert.equal(calls[2].format, undefined, "последний путь — документированный duration-only");
-  assert.equal(result.capture.mode, "file-default");
+  assert.equal(calls.length, 1, "микрофон дёргается один раз, а не трижды");
+  assert.equal(error.code, 202);
+  assert.match(error.message, /микрофон/i, "сообщение называет доступ, а не параметры");
 });
 
 test("синхронный отказ записи возвращается как ошибка, а не вешает экран", async () => {

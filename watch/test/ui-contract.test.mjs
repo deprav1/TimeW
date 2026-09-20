@@ -72,11 +72,20 @@ test("answer screen never exposes a dead speech control", async () => {
   assert.match(source, /Назад/)
 })
 
-test("notes expose full reading and metadata affordances", async () => {
-  const source = await page("notes")
-  assert.match(source, /openNote\(\$item\.id\)/)
-  assert.match(source, /note-date/)
-  assert.match(source, /Удалить/)
+// Заметку читают и удаляют на экране ответа: в диалоге помещалось только
+// начало текста, а подтверждать удаление, видя одну строку, — значит
+// подтверждать вслепую.
+test("notes open for full reading, and deleting happens next to the text", async () => {
+  const notes = await page("notes")
+  assert.match(notes, /openNote\(\$item\.id\)/)
+  assert.match(notes, /note-date/)
+  assert.match(notes, /uri: "\/pages\/answer"/)
+  assert.match(notes, /noteId: id/)
+  assert.doesNotMatch(notes, /prompt\.showDialog[\s\S]{0,200}Удалить/, "список не подтверждает удаление вслепую")
+  const answer = await page("answer")
+  assert.match(answer, /if="\{\{canDelete\}\}"/)
+  assert.match(answer, /Удалить заметку\?/)
+  assert.match(answer, /deleteNote\(self\.noteId/)
 })
 
 test("diagnostics run and stop from one large target", async () => {
@@ -177,8 +186,8 @@ test("settings fit four full-width rows without scrolling", async () => {
 test("every tappable target on the watch is at least 68px tall", async () => {
   const selectors = {
     index: ["nav-button", "quick-button", "wide-button", "talk-button", "talk-busy", "answer-area"],
-    answer: ["action-button", "back-button"],
-    notes: ["top-button", "dictate-button", "dictate-busy", "note-item"],
+    answer: ["action-button", "delete-button", "back-button"],
+    notes: ["back-button", "dictate-button", "dictate-busy", "page-button", "note-item"],
     settings: ["top-button", "row"],
     diag: ["top-button", "run-button", "run-busy"]
   }

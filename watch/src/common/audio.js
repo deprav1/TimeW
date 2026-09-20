@@ -185,18 +185,12 @@ function startFile(settings, done, fail, variant, reportSeed) {
     fail: settle(function(data, code) {
       if (cancelled) return
       active = null
-      var error = errorFrom(data, code, "Не удалось записать голос")
-      if (error.code === 202) {
-        if (variant === "rich") {
-          startFile(settings, done, fail, "minimal", lastReport)
-          return
-        }
-        if (variant === "minimal") {
-          startFile(settings, done, fail, "bare", lastReport)
-          return
-        }
-      }
-      fail(error)
+      // Лесенка вариантов убрана. Перебор форм вызова на устройстве показал,
+      // что 202 приходит на любую из них, включая вызов вообще без
+      // параметров, — значит подбирать нечего, закрыт сам доступ к
+      // микрофону. А три быстрых record.start подряд на каждое нажатие —
+      // это ровно то, после чего часы уходили в чёрный экран.
+      fail(errorFrom(data, code, "Не удалось записать голос"))
     })
   }
   var options = fileOptions(settings, simplified ? "" : "opus", minimal)
@@ -213,16 +207,7 @@ function startFile(settings, done, fail, variant, reportSeed) {
   try { record.start(request) } catch (error) {
     if (settle.cancel) settle.cancel()
     active = null
-    var startError = errorFrom(error, error && error.code, "Не удалось начать запись")
-    if (startError.code === 202 && variant === "rich") {
-      startFile(settings, done, fail, "minimal", lastReport)
-      return
-    }
-    if (startError.code === 202 && variant === "minimal") {
-      startFile(settings, done, fail, "bare", lastReport)
-      return
-    }
-    fail(startError)
+    fail(errorFrom(error, error && error.code, "Не удалось начать запись"))
   }
 }
 
@@ -378,164 +363,11 @@ export function cancelRecording() {
   try { record.stop() } catch (error) {}
 }
 
-// Зонд кадров для диагностики: отвечает на единственный вопрос — приходят ли
-// на этой прошивке кадры PCM вообще. От него зависит, может ли вопрос
-// отправляться сам, когда человек замолчал: без кадров сигнал тишины взять
-// неоткуда, и запись идёт фиксированной длины.
-//
-// Это не запись: результат никуда не отправляется, файл не создаётся,
-// длительность фиксированная и короткая.
-var PROBE_MS = 2500
-
-export function probeFrames(done) {
-  var result = {
-    slotDeclared: hasFrameEvents(), frames: 0, bytes: 0, firstFrameMs: 0,
-    ms: 0, error: "", code: null, gotUri: false
-  }
-  var startedAt = Date.now()
-  var finished = false
-  stopSpeaking()
-
-  function finish() {
-    if (finished) return
-    finished = true
-    if (settle.cancel) settle.cancel()
-    result.ms = Date.now() - startedAt
-    try { record.onframerecorded = null } catch (error) {}
-    try { record.stop() } catch (error) {}
-    active = null
-    done(result)
-  }
-
-  var settle = guard(PROBE_MS + 4000, finish)
-
-  if (!result.slotDeclared) {
-    result.error = "рантайм не объявляет onframerecorded"
-    finish()
-    return
-  }
-
-  setTimeout(function() {
-    try {
-      record.onframerecorded = function(event) {
-        if (finished || !event || !event.frameBuffer) return
-        var frame = event.frameBuffer
-        var length = frame.byteLength || frame.length || 0
-        if (!result.frames) result.firstFrameMs = Date.now() - startedAt
-        result.frames += 1
-        result.bytes += length
-      }
-      active = { mode: "probe", cancel: finish }
-      record.start({
-        duration: PROBE_MS,
-        sampleRate: FRAME_SAMPLE_RATE,
-        numberOfChannels: 1,
-        encodeBitRate: 128000,
-        frameSize: getRecordingSettings().frameSize,
-        format: "pcm",
-        success: function(data) {
-          result.gotUri = !!uriFrom(data)
-          settle(finish)()
-        },
-        complete: settle(finish),
-        fail: function(data, code) {
-          result.code = typeof code === "number" ? code : null
-          result.error = (messageForCode(code) || (data && data.message) || "отказ записи")
-          settle(finish)()
-        }
-      })
-      // Останавливаем сами: duration рантайм может и не соблюсти.
-      setTimeout(function() { if (!finished) { try { record.stop() } catch (error) {} } }, PROBE_MS)
-    } catch (error) {
-      result.error = "record.start бросил исключение"
-      finish()
-    }
-  }, AUDIO_RELEASE_MS)
-}
-
-// Перебор форм вызова record.start.
-//
-// Код 202 рантайм отдаёт и на неверные параметры, и — как выяснилось — на
-// что-то ещё: на устройстве им отвечает даже вызов с одним duration, тот
-// самый, который в эмуляторе работает. Догадками это закрыть не вышло уже
-// трижды, поэтому спрашиваем прямо: пробуем формы по очереди и записываем
-// код каждой. Первая, которая стартует, и есть рабочая — её сразу
-// останавливаем, запись никуда не идёт.
-//
-// Формы подобраны так, чтобы развести причины: пустая проверяет сам доступ
-// к микрофону (нет параметров — нет и неверных), остальные добавляют по
-// одному подозреваемому.
-var RECORD_SHAPES = [
-  { name: "пусто", options: {} },
-  { name: "duration", options: { duration: 5000 } },
-  { name: "format=amr", options: { format: "amr" } },
-  { name: "format=aac", options: { format: "aac" } },
-  { name: "format=wav", options: { format: "wav" } },
-  { name: "format=mp3", options: { format: "mp3" } },
-  { name: "sampleRate", options: { sampleRate: 8000 } }
-]
-
-export function probeRecordShapes(done) {
-  var results = []
-  stopSpeaking()
-
-  function next(index) {
-    if (index >= RECORD_SHAPES.length) {
-      done(results)
-      return
-    }
-    var shape = RECORD_SHAPES[index]
-    var settled = false
-    var entry = { name: shape.name, started: false, code: null, error: "", ms: 0 }
-    var startedAt = Date.now()
-
-    function finish() {
-      if (settled) return
-      settled = true
-      entry.ms = Date.now() - startedAt
-      try { record.stop() } catch (error) {}
-      active = null
-      results.push(entry)
-      // Пауза между попытками: рантайм отпускает микрофон не мгновенно, и
-      // без неё следующая форма получила бы чужой отказ.
-      setTimeout(function() { next(index + 1) }, AUDIO_RELEASE_MS)
-    }
-
-    // Старт без отказа в течение секунды считаем успехом: success приходит
-    // только по окончании записи, а ждать её полностью здесь незачем.
-    var patience = setTimeout(function() {
-      if (settled) return
-      entry.started = true
-      finish()
-    }, 1000)
-
-    var request = {
-      success: function() {
-        clearTimeout(patience)
-        entry.started = true
-        finish()
-      },
-      fail: function(data, code) {
-        clearTimeout(patience)
-        entry.code = typeof code === "number" ? code : null
-        entry.error = messageForCode(code) || (data && data.message) || "отказ"
-        finish()
-      }
-    }
-    Object.keys(shape.options).forEach(function(key) { request[key] = shape.options[key] })
-
-    active = { mode: "probe", cancel: function() { clearTimeout(patience); finish() } }
-    try {
-      record.start(request)
-    } catch (error) {
-      clearTimeout(patience)
-      entry.error = "исключение при вызове"
-      finish()
-    }
-  }
-
-  next(0)
-}
+// Зонд форм вызова record.start своё отработал и удалён. Он ответил на
+// вопрос, ради которого писался: 202 приходит на все семь форм, включая
+// пустую, за одну-три миллисекунды. Держать в приложении семь быстрых
+// стартов микрофона подряд ради уже известного ответа — плохой размен:
+// именно после них часы уходили в чёрный экран.
 
 export function recordingCapability() {
   return {

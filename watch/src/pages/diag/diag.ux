@@ -41,7 +41,7 @@ import volume from "@system.volume"
 import { loadSettings, getCached } from "../../common/settings"
 import { networkType } from "../../common/net"
 import { sendDiagnostics, lastVoiceStats } from "../../common/api"
-import { recordAudio, recordingCapability, probeFrames, probeRecordShapes } from "../../common/audio"
+import { recordAudio, recordingCapability } from "../../common/audio"
 import { lastPlaybackReport, lastSpeechReport, speakTest } from "../../common/speech"
 import { CONFIG_STAMP } from "../../common/config"
 import { VERSION_CODE } from "../../common/build-info"
@@ -210,9 +210,7 @@ export default {
     ]
     if (index >= targets.length) {
       report.tls = self.tlsResults
-      self.probeSpeech(report, function() {
-        self.probeFrameDelivery(report, function() { self.probeRecording(report) })
-      })
+      self.probeSpeech(report, function() { self.probeRecording(report) })
       return
     }
     if (index === 0) self.tlsResults = []
@@ -277,41 +275,6 @@ export default {
     if (value === undefined || value === null || value < 0) return "модуль недоступен"
     if (value < 0.05) return "в нуле — озвучку не слышно"
     return Math.round(value * 100) + "%"
-  },
-
-  // Приходят ли кадры PCM — единственный вопрос, от которого зависит, может
-  // ли вопрос отправляться сам, когда человек замолчал. Проверяется отдельно
-  // от записи: там кадры могут не понадобиться вовсе, и отказ спутался бы с
-  // отказом записи.
-  //
-  // Стоит он и вторым делом: зонд идёт сразу после озвучки, то есть ровно в
-  // том порядке, в котором на часах ломался микрофон. Если кадры приходят
-  // здесь — аудиосессия отпускается как надо.
-  probeFrameDelivery(report, next) {
-    var self = this
-    if (self.cancelled) return
-    self.progressText = "проверяю автоотправку"
-    self.add("кадры", "слушаю 2,5 с…")
-    probeFrames(function(result) {
-      if (self.cancelled) return
-      report.frameProbe = result
-      var verdict = result.frames > 0
-        ? result.frames + " кадров, " + result.bytes + " байт — автоотправка возможна"
-        : (result.error || "кадров нет") + (result.code ? " (код " + result.code + ")" : "")
-      self.add("кадры", verdict)
-      // Если кадры не пришли из-за 202, следующий вопрос — а стартует ли
-      // запись вообще хоть в какой-нибудь форме.
-      self.progressText = "перебираю формы записи"
-      probeRecordShapes(function(shapes) {
-        if (self.cancelled) return
-        report.recordShapes = shapes
-        var working = shapes.filter(function(entry) { return entry.started })
-        self.add("формы записи", working.length
-          ? "стартует: " + working.map(function(e) { return e.name }).join(", ")
-          : "ни одна не стартует (" + shapes.map(function(e) { return e.name + ":" + (e.code || "?") }).join(" ") + ")")
-        next()
-      })
-    })
   },
 
   probeRecording(report) {

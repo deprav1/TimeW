@@ -335,6 +335,10 @@ function fetchAudio(url, onUri, onFail) {
   // на случай прошивки, где он работает.
   if (getRecordingSettings().speechTransport !== "download") {
     speechReport = freshReport("fetch-base64", "object", "bytes-first", !!getCached().deviceToken)
+    if (!fileFetchUnusable) {
+      fetchAudioFile(url, onUri, onFail)
+      return
+    }
     fetchAudioBytes(url, onUri, onFail)
     return
   }
@@ -424,10 +428,12 @@ var MAX_BASE64_CHARS = 96000
 // слышна. Но проиграет ли рантайм такой файл, заранее неизвестно, поэтому
 // при первом же отказе воспроизведения переходим на 16 бит и больше
 // восемь не просим.
-var bitsUnsupported = false
-
+// Восемь бит на отсчёт рантайм не проиграл: в отчёте с устройства видно,
+// как воспроизведение отказало и часы переспросили в шестнадцати. Значит
+// просить восемь — это гарантированная лишняя загрузка, лишний разбор и
+// отказ воспроизведения на каждой сессии. Просим сразу шестнадцать.
 function speechBits() {
-  return bitsUnsupported ? 16 : 8
+  return 16
 }
 
 var B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -503,6 +509,59 @@ function decodeBase64(text) {
 function bytesUrl(url) {
   return url + (url.indexOf("?") >= 0 ? "&" : "?") +
     "as=base64&rate=" + FALLBACK_RATE + "&bits=" + speechBits()
+}
+
+// Самый дешёвый путь: попросить рантайм положить ответ сразу в файл.
+//
+// Тогда base64 не нужен вовсе — а это и треть объёма, и полторы секунды
+// разбора по отчёту с устройства, и пик в куче, из-за которого часы
+// зависали. Поддерживает ли прошивка responseType: "file", заранее
+// неизвестно, поэтому при первом же промахе переходим на base64 и больше
+// файл не просим.
+var fileFetchUnusable = false
+
+function fetchAudioFile(url, onUri, onFail) {
+  var epoch = speechEpoch
+  var askedAt = Date.now()
+  speechReport.transport = "fetch-file"
+  var settle = guard(UPLOAD_TIMEOUT_MS, function() {
+    fileFetchUnusable = true
+    fetchAudioBytes(url, onUri, onFail)
+  })
+  var headers = {}
+  var token = getCached().deviceToken
+  if (token) headers["X-TimeW-Device-Token"] = token
+  try {
+    fetch.fetch({
+      url: url,
+      method: "GET",
+      responseType: "file",
+      header: headers,
+      success: settle(function(response) {
+        if (!currentEpoch(epoch)) return
+        var uri = response && (response.data || response.uri || response.tempFilePath)
+        if (typeof uri === "string" && uri) {
+          speechReport.timings.fetchMs = Date.now() - askedAt
+          speechReport.fallback = "file"
+          onUri(uri)
+          return
+        }
+        // Ответ пришёл, но не файлом: прошивка параметр не поняла.
+        fileFetchUnusable = true
+        fetchAudioBytes(url, onUri, onFail)
+      }),
+      fail: settle(function() {
+        if (!currentEpoch(epoch)) return
+        fileFetchUnusable = true
+        fetchAudioBytes(url, onUri, onFail)
+      })
+    })
+  } catch (error) {
+    settle(function() {
+      fileFetchUnusable = true
+      fetchAudioBytes(url, onUri, onFail)
+    })()
+  }
 }
 
 function fetchAudioBytes(url, onUri, onFail) {
@@ -645,16 +704,7 @@ function writeAudioFile(buffer, onUri, onFail) {
 
 function download(speechId, done, fail) {
   fetchAudio(speechUrl(speechId), function(uri) {
-    play(uri, done, function(error) {
-      // Файл доехал, но не проигрался. Самое вероятное — рантайм не принял
-      // 8 бит на отсчёт; переспрашиваем в 16 и запоминаем на сессию.
-      if (!bitsUnsupported) {
-        bitsUnsupported = true
-        download(speechId, done, fail)
-        return
-      }
-      fail(error)
-    })
+    play(uri, done, fail)
   }, fail)
 }
 
@@ -675,11 +725,6 @@ export function speakTest(done, fail) {
         done({ volume: value, uri: uri, downloadedMs: downloadedMs, ms: Date.now() - startedAt,
           started: lastPlayback.started, speech: lastSpeechReport() })
       }, function(error) {
-        if (!bitsUnsupported) {
-          bitsUnsupported = true
-          speakTest(done, fail)
-          return
-        }
         fail({ message: (error && error.message) || "не проигралось", volume: value,
           uri: uri, downloadedMs: downloadedMs, ms: Date.now() - startedAt,
           speech: lastSpeechReport() })
@@ -697,7 +742,7 @@ export function speakTest(done, fail) {
 // живёт до перезапуска приложения, а в тестах каждый случай свой.
 export function resetSpeechTransport() {
   downloadUnusable = false
-  bitsUnsupported = false
+  fileFetchUnusable = false
 }
 
 export function stopSpeaking() {

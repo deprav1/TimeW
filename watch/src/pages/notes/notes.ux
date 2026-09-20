@@ -1,29 +1,16 @@
 <template>
   <div class="page">
-    <!-- Обе цели наверху — кнопки, а не подписи: по тексту высотой в шрифт
-         пальцем не попасть. Правая кнопка листает список, когда заметок
-         больше, чем помещается, и обновляет его, когда все на экране. -->
+    <!-- Экран принадлежит списку: заметки читают и разбирают чаще, чем
+         диктуют, поэтому диктовка ушла в одну кнопку внизу, а список занял
+         всю середину. -->
     <div class="top-row">
-      <div class="top-button" onclick="goBack"><text class="top-label">Назад</text></div>
-      <div class="top-button refresh-button" onclick="pageOrRefresh"><text class="top-label">{{pageLabel}}</text></div>
+      <div class="back-button" onclick="goBack"><text class="top-label">Назад</text></div>
     </div>
 
-    <!-- Большая кнопка и здесь: диктовка — главное действие экрана,
-         а список нужен реже, чем кажется. -->
-    <div class="{{dictateClass}}" onclick="dictate">
-      <text class="dictate-label">{{dictateLabel}}</text>
-    </div>
-
-    <!-- Одна строка состояния вместо четырёх: каждая отдельная строка
-         двигала бы список под рамку. -->
-    <text class="error" if="{{errorText}}">{{errorText}}</text>
-    <text class="hint" if="{{hintText}}">{{hintText}}</text>
-
-    <!-- Ни list, ни list-item: в этой сборке Vela они не рисуются вовсе
-         (проверено в эмуляторе на экране ответа). Работает scroll с
-         обычными div, в том числе с for. Показываем ровно две заметки:
-         scroll в этой сборке не обрезает содержимое, и третья залезала бы
-         под рамку, а прокрутку проверить нечем. -->
+    <!-- Ни list, ни list-item: в этой сборке Vela они не рисуются вовсе.
+         Работает scroll с обычными div, в том числе с for. Показываем три
+         заметки: scroll содержимое не обрезает, четвёртая залезла бы под
+         рамку, а прокрутку проверить нечем. -->
     <scroll class="notes-scroll" scroll-y="true">
       <div class="note-item" for="{{visibleNotes}}" onclick="openNote($item.id)">
         <div class="note-copy">
@@ -32,6 +19,15 @@
         </div>
       </div>
     </scroll>
+
+    <!-- Одна строка состояния на всё: ошибка, очередь, пустой список. -->
+    <text class="error" if="{{errorText}}">{{errorText}}</text>
+    <text class="hint" if="{{hintText}}">{{hintText}}</text>
+
+    <div class="bottom-row">
+      <div class="{{dictateClass}}" onclick="dictate"><text class="bottom-label">{{dictateLabel}}</text></div>
+      <div class="page-button" onclick="pageOrRefresh"><text class="bottom-label">{{pageLabel}}</text></div>
+    </div>
   </div>
 </template>
 
@@ -65,7 +61,7 @@ export default {
 
   private: {
     notes: [],
-    // На экран помещаются две заметки; остальные листаются кнопкой.
+    // На экран помещаются три заметки; остальные листаются кнопкой.
     visibleNotes: [],
     notesPage: 0,
     pageLabel: "Обновить",
@@ -77,7 +73,7 @@ export default {
     queuedCount: 0,
     busy: false,
     dictateClass: "dictate-button",
-    dictateLabel: "Надиктовать",
+    dictateLabel: "Диктовать",
     voiceEpoch: 0,
     recording: false,
     settingsReady: false,
@@ -125,7 +121,7 @@ export default {
   // Страница списка и подпись правой кнопки считаются вместе: кнопка либо
   // листает, либо обновляет, и подпись обязана это показывать.
   applyPage() {
-    var size = 2
+    var size = 3
     var total = this.notes.length
     var pages = Math.max(1, Math.ceil(total / size))
     if (this.notesPage >= pages) this.notesPage = 0
@@ -135,7 +131,7 @@ export default {
   },
 
   pageOrRefresh() {
-    if (this.notes.length > 2) {
+    if (this.notes.length > 3) {
       this.notesPage += 1
       this.applyPage()
       return
@@ -189,20 +185,19 @@ export default {
     router.back()
   },
 
+  // Заметку читают на экране ответа: там крупный шрифт и листание по
+  // страницам. Диалог показывал только начало длинной заметки, а дочитать
+  // её было негде. Удаление живёт там же, рядом с текстом, который
+  // удаляют, — иначе человек подтверждает вслепую.
   openNote(id) {
-    var self = this
     var note = null
-    for (var i = 0; i < self.notes.length; i++) {
-      if (self.notes[i].id === id) { note = self.notes[i]; break }
+    for (var i = 0; i < this.notes.length; i++) {
+      if (this.notes[i].id === id) { note = this.notes[i]; break }
     }
     if (!note) return
-    prompt.showDialog({
-      title: note.createdAt ? String(note.createdAt).slice(0, 16).replace("T", " ") : "Заметка",
-      message: note.text,
-      buttons: [{ text: "Закрыть" }, { text: "Удалить" }],
-      success: function(data) {
-        if (data && data.index === 1) self.askDelete(id)
-      }
+    router.push({
+      uri: "/pages/answer",
+      params: { text: note.text, source: "note", noteId: id }
     })
   },
 
@@ -225,7 +220,7 @@ export default {
       self.voiceEpoch += 1
       cancelRecording()
       self.setBusy(false)
-      self.dictateLabel = "Надиктовать"
+      self.dictateLabel = "Диктовать"
       return
     }
     var epoch = self.voiceEpoch + 1
@@ -244,12 +239,12 @@ export default {
       send(source, audio.contentType, "note", function(response) {
         if (epoch !== self.voiceEpoch) return
         self.setBusy(false)
-        self.dictateLabel = "Надиктовать"
+        self.dictateLabel = "Диктовать"
         self.confirmDraft(response.transcript || "")
       }, function(error) {
         if (epoch !== self.voiceEpoch) return
         self.setBusy(false)
-        self.dictateLabel = "Надиктовать"
+        self.dictateLabel = "Диктовать"
         // Без сети распознать некому: откладываем саму запись, а не текст.
         if (!(error && error.serverError)) {
           self.defer(audio, error)
@@ -261,7 +256,7 @@ export default {
       if (epoch !== self.voiceEpoch) return
       self.recording = false
       self.setBusy(false)
-      self.dictateLabel = "Надиктовать"
+      self.dictateLabel = "Диктовать"
       self.errorText = messageFrom(error)
     })
   },
@@ -316,23 +311,8 @@ export default {
     }, key)
   },
 
-  askDelete(id) {
-    var self = this
-    if (self.busy || !id) return
-    var noteText = ""
-    for (var i = 0; i < self.notes.length; i++) {
-      if (self.notes[i].id === id) { noteText = self.notes[i].text; break }
-    }
-    prompt.showDialog({
-      title: "Удалить заметку?",
-      message: noteText,
-      buttons: [{ text: "Удалить" }, { text: "Отмена" }],
-      success: function(data) {
-        if (data && data.index === 0) self.performDelete(id)
-      }
-    })
-  },
-
+  // Возврат с экрана чтения после удаления: список перечитывается, чтобы
+  // удалённая заметка не осталась на экране.
   performDelete(id) {
     var self = this
     self.setBusy(true)
@@ -349,25 +329,27 @@ export default {
 </script>
 
 <style>
-/* Раскладка по кругу: верхний ряд стоит там, где круг даёт 265px, а
-   диктовка и список — в середине, где помещаются все 370. Страница всегда
-   480: при меньшей ширине рантайм прижимает содержимое влево. */
+/* Раскладка по кругу: ряды кнопок стоят там, где круг даёт 265px, список —
+   в середине, где помещаются 370. Страница всегда 480: при меньшей ширине
+   рантайм прижимает содержимое влево, и левый край уходит под рамку. */
 .page { width: 480px; height: 480px; flex-direction: column; align-items: center; justify-content: center; background-color: #0b1020; }
+
 .top-row { flex-direction: row; justify-content: center; align-items: center; height: 68px; }
-.top-button { width: 126px; height: 68px; border-radius: 22px; background-color: #22314e; justify-content: center; align-items: center; margin-left: 4px; margin-right: 4px; }
-.refresh-button { background-color: #2c3e5c; }
+.back-button { width: 180px; height: 68px; border-radius: 22px; background-color: #22314e; justify-content: center; align-items: center; }
 .top-label { color: #cfe0f7; font-size: 18px; font-weight: bold; text-align: center; }
 
-.dictate-button { width: 370px; height: 100px; border-radius: 34px; background-color: #31b2d8; justify-content: center; align-items: center; margin-top: 4px; }
-.dictate-busy { width: 370px; height: 100px; border-radius: 34px; background-color: #6f8aa6; justify-content: center; align-items: center; margin-top: 4px; }
-.dictate-label { color: #07111e; font-size: 26px; font-weight: bold; }
-
-.hint { color: #6f80a2; font-size: 15px; height: 24px; margin-top: 4px; text-align: center; width: 340px; lines: 1; text-overflow: ellipsis; }
-.error { color: #ff8f8f; font-size: 15px; height: 24px; margin-top: 4px; text-align: center; width: 340px; lines: 1; text-overflow: ellipsis; }
-
-.notes-scroll { width: 370px; height: 160px; margin-top: 4px; flex: none; flex-direction: column; }
-.note-item { width: 366px; height: 72px; margin-top: 6px; padding-left: 16px; padding-right: 16px; border-radius: 18px; background-color: #141d33; align-items: center; }
+.notes-scroll { width: 370px; height: 220px; margin-top: 4px; flex: none; flex-direction: column; }
+.note-item { width: 366px; height: 68px; margin-top: 4px; padding-left: 16px; padding-right: 16px; border-radius: 18px; background-color: #141d33; align-items: center; }
 .note-copy { flex-direction: column; width: 330px; }
 .note-text { color: #eaf1ff; font-size: 19px; lines: 1; text-overflow: ellipsis; width: 330px; }
 .note-date { color: #7084a7; font-size: 13px; lines: 1; text-overflow: ellipsis; width: 330px; margin-top: 2px; }
+
+.hint { color: #6f80a2; font-size: 15px; height: 20px; margin-top: 4px; text-align: center; width: 340px; lines: 1; text-overflow: ellipsis; }
+.error { color: #ff8f8f; font-size: 15px; height: 20px; margin-top: 4px; text-align: center; width: 340px; lines: 1; text-overflow: ellipsis; }
+
+.bottom-row { flex-direction: row; justify-content: center; align-items: center; height: 68px; margin-top: 4px; }
+.dictate-button { width: 134px; height: 68px; border-radius: 22px; background-color: #31b2d8; justify-content: center; align-items: center; margin-right: 4px; }
+.dictate-busy { width: 134px; height: 68px; border-radius: 22px; background-color: #6f8aa6; justify-content: center; align-items: center; margin-right: 4px; }
+.page-button { width: 134px; height: 68px; border-radius: 22px; background-color: #9fb3cc; justify-content: center; align-items: center; }
+.bottom-label { color: #07111e; font-size: 17px; font-weight: bold; text-align: center; }
 </style>
