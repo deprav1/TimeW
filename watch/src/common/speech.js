@@ -335,10 +335,6 @@ function fetchAudio(url, onUri, onFail) {
   // на случай прошивки, где он работает.
   if (getRecordingSettings().speechTransport !== "download") {
     speechReport = freshReport("fetch-base64", "object", "bytes-first", !!getCached().deviceToken)
-    if (!fileFetchUnusable) {
-      fetchAudioFile(url, onUri, onFail)
-      return
-    }
     fetchAudioBytes(url, onUri, onFail)
     return
   }
@@ -511,58 +507,19 @@ function bytesUrl(url) {
     "as=base64&rate=" + FALLBACK_RATE + "&bits=" + speechBits()
 }
 
-// Самый дешёвый путь: попросить рантайм положить ответ сразу в файл.
+// Путь «ответ сразу файлом» (@system.fetch с responseType: "file") убран.
 //
-// Тогда base64 не нужен вовсе — а это и треть объёма, и полторы секунды
-// разбора по отчёту с устройства, и пик в куче, из-за которого часы
-// зависали. Поддерживает ли прошивка responseType: "file", заранее
-// неизвестно, поэтому при первом же промахе переходим на base64 и больше
-// файл не просим.
-var fileFetchUnusable = false
-
-function fetchAudioFile(url, onUri, onFail) {
-  var epoch = speechEpoch
-  var askedAt = Date.now()
-  speechReport.transport = "fetch-file"
-  var settle = guard(UPLOAD_TIMEOUT_MS, function() {
-    fileFetchUnusable = true
-    fetchAudioBytes(url, onUri, onFail)
-  })
-  var headers = {}
-  var token = getCached().deviceToken
-  if (token) headers["X-TimeW-Device-Token"] = token
-  try {
-    fetch.fetch({
-      url: url,
-      method: "GET",
-      responseType: "file",
-      header: headers,
-      success: settle(function(response) {
-        if (!currentEpoch(epoch)) return
-        var uri = response && (response.data || response.uri || response.tempFilePath)
-        if (typeof uri === "string" && uri) {
-          speechReport.timings.fetchMs = Date.now() - askedAt
-          speechReport.fallback = "file"
-          onUri(uri)
-          return
-        }
-        // Ответ пришёл, но не файлом: прошивка параметр не поняла.
-        fileFetchUnusable = true
-        fetchAudioBytes(url, onUri, onFail)
-      }),
-      fail: settle(function() {
-        if (!currentEpoch(epoch)) return
-        fileFetchUnusable = true
-        fetchAudioBytes(url, onUri, onFail)
-      })
-    })
-  } catch (error) {
-    settle(function() {
-      fileFetchUnusable = true
-      fetchAudioBytes(url, onUri, onFail)
-    })()
-  }
-}
+// Идея была хорошая: без base64 исчезали и треть объёма, и полторы секунды
+// разбора, и пик в куче. Но проверить её было негде — в эмуляторе звука нет,
+// — и на устройстве она сломала озвучку целиком. Отчёт: transport
+// "fetch-file", fetchMs 11522, playback.started false, «Часы не смогли
+// проиграть ответ». Рантайм принял параметр, вернул строку, которая не
+// является путём к файлу, а код принял любую строку за путь — и запасной
+// путь не включился, потому что формально всё «получилось».
+//
+// Правило, которое из этого следует: транспорт меняется только когда у
+// нового есть подтверждённое рабочее состояние на устройстве. У base64 оно
+// есть, у файла не было.
 
 function fetchAudioBytes(url, onUri, onFail) {
   var epoch = speechEpoch
@@ -742,7 +699,6 @@ export function speakTest(done, fail) {
 // живёт до перезапуска приложения, а в тестах каждый случай свой.
 export function resetSpeechTransport() {
   downloadUnusable = false
-  fileFetchUnusable = false
 }
 
 export function stopSpeaking() {
