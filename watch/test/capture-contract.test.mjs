@@ -47,3 +47,12 @@ test("capture handoff keeps the server contract inputs", () => {
   assert.match(index, /voiceUri\(uri, self\.captureContentType/);
   assert.match(notes, /voiceUri\(uri, self\.captureContentType/);
 });
+
+test("capture screen stays readable and cancelable on the round watch", () => {
+  assert.match(capture, /modeLabel/);
+  assert.match(capture, /Новая заметка/);
+  assert.match(capture, /Команда дому/);
+  assert.match(capture, /onclick="cancelCapture"/);
+  assert.match(capture, /\.back-button\s*\{[^}]*height:\s*68px/);
+  assert.match(capture, /\.capture-button\s*\{[^}]*width:\s*370px[^}]*height:\s*96px/);
+});

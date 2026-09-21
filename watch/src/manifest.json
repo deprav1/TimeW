@@ -2,7 +2,7 @@
   "package": "com.timew.personal",
   "name": "TimeW",
   "versionName": "0.3.0",
-  "versionCode": 87,
+  "versionCode": 88,
   "minPlatformVersion": 1000,
   "icon": "/common/icon.png",
   "deviceTypeList": [

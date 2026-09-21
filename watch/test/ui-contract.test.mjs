@@ -17,7 +17,7 @@ test("main screen keeps the high-frequency actions large and explicit", async ()
   assert.match(source, /Отменить действие/)
   assert.match(source, /showCancel/)
   assert.match(source, /homeAvailable/)
-  assert.match(source, /Дом · нет/)
+  assert.match(source, /if="\{\{homeAvailable\}\}" onclick="startHome"/)
   assert.doesNotMatch(source, /onclick="unstick"\s*class="status"/)
 })
 
@@ -104,7 +104,7 @@ test("diagnostics run and stop from one large target", async () => {
 // содержимое влево и левый край уходит под рамку), а ни один блок не шире
 // 370 — столько круг держит в полосе, где вообще стоит что-то размещать.
 test("round-screen pages fill the screen and keep every block inside the circle", async () => {
-  for (const name of ["index", "answer", "notes", "settings", "diag"]) {
+  for (const name of ["index", "answer", "notes", "settings", "diag", "capture"]) {
     const source = await page(name)
     assert.match(source, /\.page\s*\{[\s\S]*?flex-direction:\s*column/)
     assert.doesNotMatch(source, /width:\s*100%/, `${name} must not stretch critical page children`)
@@ -124,7 +124,7 @@ test("round-screen pages fill the screen and keep every block inside the circle"
 // box-shadow на устройстве превращался в широкое кольцо вокруг невидимой
 // кнопки. Заливка — только сплошным цветом.
 test("watch pages paint with flat colors the runtime can actually draw", async () => {
-  for (const name of ["index", "answer", "notes", "settings", "diag"]) {
+  for (const name of ["index", "answer", "notes", "settings", "diag", "capture"]) {
     const source = await page(name)
     // Ищем именно объявления: слова «linear-gradient» и «box-shadow» должны
     // оставаться в комментариях, объясняющих, почему их тут нет.
@@ -189,7 +189,8 @@ test("every tappable target on the watch is at least 68px tall", async () => {
     answer: ["action-button", "delete-button", "back-button"],
     notes: ["back-button", "dictate-button", "dictate-busy", "page-button", "note-item"],
     settings: ["top-button", "row"],
-    diag: ["top-button", "run-button", "run-busy"]
+    diag: ["top-button", "run-button", "run-busy"],
+    capture: ["back-button", "capture-button"]
   }
   for (const [name, list] of Object.entries(selectors)) {
     const source = await page(name)

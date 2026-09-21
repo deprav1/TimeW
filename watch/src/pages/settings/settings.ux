@@ -82,7 +82,7 @@ function labelForSpeak(enabled) {
 function labelForProvider(provider) {
   if (provider === "gemini") return "Gemini"
   if (provider === "openai") return "ChatGPT"
-  return "авто (как на шлюзе)"
+  return "Авто"
 }
 
 function isValidUrl(url) {
@@ -115,7 +115,7 @@ export default {
     speakAnswers: false,
     speakDisplay: "выключено",
     aiProvider: "auto",
-    providerDisplay: "авто (как на шлюзе)",
+    providerDisplay: "Авто",
     checkResult: "",
     errorText: "",
     networkDisplay: "…",
@@ -258,10 +258,9 @@ export default {
           self.errorText = connectionError(status, parsed)
           return
         }
-        var mode = parsed && parsed.mode ? parsed.mode : "unknown"
         if (parsed && parsed.runtime) applyRemoteRuntime(parsed.runtime)
         // Главная строка проверки: видно, каким путём часы дошли до шлюза.
-        self.showInfo("связь есть (" + self.checkVia + "), режим " + mode)
+        self.showInfo("Связь есть · " + self.checkVia)
         // Озвучка требует отдельного ключа на шлюзе. Без этой строки
         // включённая «Озвучка» просто молчит, и понять почему нельзя.
         var caps = parsed && parsed.capabilities

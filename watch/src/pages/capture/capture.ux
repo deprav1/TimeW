@@ -1,0 +1,231 @@
+<template>
+  <div class="page">
+    <div class="top-row">
+      <div class="back-button" onclick="cancelCapture"><text class="nav-label">Отмена</text></div>
+    </div>
+    <text class="title">{{modeLabel}}</text>
+    <text class="status">{{status}}</text>
+    <div class="capture-button" onclick="toggleCapture">
+      <text class="capture-label">{{buttonLabel}}</text>
+    </div>
+    <text class="hint">{{hintText}}</text>
+  </div>
+</template>
+
+<style>
+.page { width: 480px; height: 480px; flex-direction: column; align-items: center; justify-content: center; background-color: #0b1020; }
+.top-row { flex-direction: row; justify-content: center; align-items: center; height: 68px; }
+.back-button { width: 180px; height: 68px; border-radius: 22px; background-color: #22314e; justify-content: center; align-items: center; }
+.nav-label { color: #cfe0f7; font-size: 18px; font-weight: bold; text-align: center; }
+.title { color: #7de3ff; font-size: 25px; font-weight: bold; width: 300px; height: 34px; text-align: center; margin-top: 4px; lines: 1; text-overflow: ellipsis; }
+.status { color: #fbbf24; font-size: 20px; width: 340px; height: 54px; text-align: center; margin-top: 8px; lines: 2; text-overflow: ellipsis; }
+.capture-button { width: 370px; height: 96px; margin-top: 8px; border-radius: 34px; background-color: #31b2d8; justify-content: center; align-items: center; }
+.capture-label { color: #07111e; font-size: 29px; font-weight: bold; text-align: center; }
+.hint { color: #8fa4c7; font-size: 16px; width: 340px; height: 42px; text-align: center; margin-top: 10px; lines: 2; text-overflow: ellipsis; }
+</style>
+
+<script>
+import router from "@system.router"
+import record from "@system.record"
+import fetch from "@system.fetch"
+import { GATEWAY_URL, DEVICE_TOKEN } from "../../common/config"
+import { VERSION_CODE } from "../../common/build-info"
+
+var MAX_DURATION = 10000
+var active = false
+var finished = false
+var captureGeneration = 0
+
+function baseUrl() {
+  var value = GATEWAY_URL || ""
+  return value.charAt(value.length - 1) === "/" ? value.slice(0, -1) : value
+}
+
+function textOf(value) {
+  if (!value) return "неизвестная ошибка"
+  if (typeof value === "string") return value
+  return value.message || JSON.stringify(value)
+}
+
+function reportFor(request, startedAt) {
+  return {
+    probe: "isolated-capture",
+    versionCode: VERSION_CODE,
+    packageName: "com.timew.personal",
+    request: request,
+    startedAt: new Date(startedAt).toISOString(),
+    observed: "pending",
+    callbacks: { successMs: null, failMs: null, completeMs: null },
+    code: null,
+    result: null,
+    error: ""
+  }
+}
+
+export default {
+  protected: {
+    intent: "",
+    returnTo: "index"
+  },
+
+  private: {
+    modeLabel: "Вопрос",
+    status: "готово к записи",
+    buttonLabel: "Начать",
+    hintText: "Нажмите «Начать» и говорите",
+    report: null,
+    startedAt: 0,
+    watchdog: 0
+  },
+
+  onInit() {
+    this.modeLabel = this.intent === "note" ? "Новая заметка" :
+      (this.intent === "home" ? "Команда дому" : "Вопрос")
+  },
+
+  onDestroy() {
+    captureGeneration += 1
+    finished = true
+    if (active) {
+      try { record.stop() } catch (error) {}
+    }
+    if (this.watchdog) clearTimeout(this.watchdog)
+    active = false
+  },
+
+  cancelCapture() {
+    captureGeneration += 1
+    finished = true
+    if (this.watchdog) {
+      clearTimeout(this.watchdog)
+      this.watchdog = 0
+    }
+    if (active) {
+      try { record.stop() } catch (error) {}
+    }
+    active = false
+    var target = this.returnTo === "notes" ? "/pages/notes" : "/pages/index"
+    router.replace({ uri: target })
+  },
+
+  toggleCapture() {
+    if (active) {
+      this.status = "завершаю…"
+      try { record.stop() } catch (error) { this.failCapture(error, error && error.code) }
+      return
+    }
+    this.startCapture()
+  },
+
+  startCapture() {
+    var self = this
+    var generation = ++captureGeneration
+    var startedAt = Date.now()
+    var request = {
+      duration: MAX_DURATION,
+      sampleRate: 8000,
+      numberOfChannels: 1,
+      encodeBitRate: 12800,
+      format: "opus"
+    }
+    active = true
+    finished = false
+    self.startedAt = startedAt
+    self.report = reportFor(request, startedAt)
+    self.status = "говорите…"
+    self.buttonLabel = "Готово"
+    self.hintText = "Нажмите «Готово», когда закончите"
+    self.watchdog = setTimeout(function() {
+      if (!active || finished || generation !== captureGeneration) return
+      try { record.stop() } catch (error) {}
+      self.failCapture({ message: "запись не завершилась вовремя" }, null, generation)
+    }, MAX_DURATION + 4000)
+
+    request.success = function(data) {
+       if (generation !== captureGeneration || finished) return
+      finished = true
+      active = false
+      self.report.observed = "success"
+      self.report.callbacks.successMs = Date.now() - startedAt
+      self.report.result = data || null
+      var uri = data && (data.uri || data.path || data)
+      if (!uri || typeof uri !== "string") {
+        finished = false
+       self.failCapture({ message: "рантайм не вернул URI записи" }, null, generation)
+        return
+      }
+      self.buttonLabel = "Отправляю"
+      self.hintText = "Секунду…"
+      self.report.callbacks.completeMs = Date.now() - startedAt
+      self.status = "отправляю запись…"
+      // Do not hold the internal://cache URI while the diagnostic receipt
+      // round-trip completes. Vela may purge that cache between callbacks.
+      // The receipt is best-effort; the rich page now emits the authoritative
+      // /voice and TTS receipts after the handoff.
+      self.sendReport()
+      if (generation !== captureGeneration) return
+      var target = self.returnTo === "notes" ? "/pages/notes" : "/pages/index"
+      router.replace({ uri: target, params: {
+        captureUri: uri,
+        captureContentType: "audio/opus",
+        captureIntent: self.intent || "",
+        captureRecordedMs: String(Date.now() - startedAt),
+        autoDictate: ""
+      } })
+    }
+    request.fail = function(error, code) {
+       self.failCapture(error, code, generation)
+    }
+    request.complete = function() {
+      if (self.report) self.report.callbacks.completeMs = Date.now() - startedAt
+    }
+
+    // This call must remain directly in the button handler. Do not move it
+    // behind storage, settings, audio cleanup, or an asynchronous callback.
+    try { record.start(request) } catch (error) { self.failCapture(error, error && error.code, generation) }
+  },
+
+  failCapture(error, code, generation) {
+    if (generation !== undefined && generation !== captureGeneration) return
+    if (finished && this.report && this.report.observed === "success") return
+    finished = true
+    active = false
+    if (this.watchdog) clearTimeout(this.watchdog)
+    if (this.report) {
+      this.report.observed = "fail"
+      this.report.code = code === undefined ? null : code
+      this.report.error = textOf(error)
+      this.report.callbacks.failMs = Date.now() - this.startedAt
+      this.report.callbacks.completeMs = this.report.callbacks.failMs
+    }
+    this.buttonLabel = "Повторить"
+    this.hintText = "Можно попробовать ещё раз"
+    this.status = "ошибка: " + textOf(error)
+    this.sendReport()
+  },
+
+  sendReport(done) {
+    var report = this.report
+    if (!report || !baseUrl()) { if (done) done(); return }
+    var settled = false
+    var finish = function() {
+      if (settled) return
+      settled = true
+      if (done) done()
+    }
+    setTimeout(finish, 2500)
+    try {
+      var header = { "Content-Type": "application/json" }
+      if (DEVICE_TOKEN) header["X-TimeW-Device-Token"] = DEVICE_TOKEN
+      fetch.fetch({
+        url: baseUrl() + "/api/v1/diag",
+        method: "POST",
+        header: header,
+        data: JSON.stringify(report),
+        success: finish,
+        fail: finish
+      })
+    } catch (error) { finish() }
+  }
+}
+</script>

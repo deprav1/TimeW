@@ -34,7 +34,7 @@
     <!-- Нижний ряд меняет содержимое, но не высоту: иначе при отмене или
          откате вся колонка съезжала бы под рамку. -->
     <div class="quick-row" if="{{showQuick}}">
-      <div class="quick-button home-button" onclick="startHome"><text class="quick-label">{{homeLabel}}</text></div>
+      <div class="quick-button home-button" if="{{homeAvailable}}" onclick="startHome"><text class="quick-label">Дом</text></div>
       <div class="quick-button note-button" onclick="startNote"><text class="quick-label">Заметка</text></div>
     </div>
     <div class="quick-row" if="{{undoToken}}">
@@ -50,19 +50,35 @@
 import prompt from "@system.prompt"
 import vibrator from "@system.vibrator"
 import router from "@system.router"
-import { query, voiceUri, voiceBytes, status as fetchStatus, confirmHome, undoHome } from "../../common/api"
-import { recordAudio, stopRecording, cancelRecording } from "../../common/audio"
+import { query, voiceUri, status as fetchStatus, confirmHome, undoHome, sendDiagnostics } from "../../common/api"
 import { loadSettings, getCached, getRecordingSettings, applyRemoteRuntime } from "../../common/settings"
-import { speak } from "../../common/speech"
 import { isOnline } from "../../common/net"
 import { loadQueue, getQueued, flush } from "../../common/queue"
 import { loadCachedNotes } from "../../common/notes-cache"
+import { VERSION_CODE } from "../../common/build-info"
 
 function messageFrom(error) {
   return error && error.message ? error.message : "Не удалось связаться со шлюзом"
 }
 
+// Capture diagnostics prove only that the microphone returned a URI. This
+// compact receipt closes the next hop without uploading transcript content:
+// it records whether /voice answered and whether it handed back a speech id.
+function sendVoiceReceipt(phase, fields) {
+  var report = { probe: "voice-e2e", phase: phase, versionCode: VERSION_CODE,
+    at: new Date().toISOString() }
+  Object.keys(fields || {}).forEach(function(key) { report[key] = fields[key] })
+  sendDiagnostics(report, function() {}, function() {})
+}
+
 export default {
+  protected: {
+    captureUri: "",
+    captureContentType: "",
+    captureIntent: "",
+    captureRecordedMs: ""
+  },
+
   private: {
     status: "готов",
     result: "Нажмите и спросите",
@@ -83,7 +99,15 @@ export default {
     showQuick: true,
     showCancel: false,
     homeAvailable: false,
-    homeLabel: "Дом · ?"
+    // Optimistic until the first protected status response. A definitive
+    // speech:false keeps the user on the answer screen instead of launching
+    // a guaranteed silent auto-play attempt.
+    speechAvailable: true,
+    captureConsumed: "",
+    pendingCaptureUri: "",
+    pendingCaptureContentType: "",
+    pendingCaptureIntent: "",
+    pendingCaptureRecordedMs: 0
   },
 
   onShow() {
@@ -94,6 +118,7 @@ export default {
         self.errorText = "Шлюз не настроен"
         return
       }
+      self.consumeCapture()
       // onShow срабатывает заново каждый раз, когда экран гаснет и зажигается
       // — документация Vela отдельно предупреждает не вешать на него запрос
       // без оглядки. На часах экран гаснет постоянно, поэтому синхронизация
@@ -108,7 +133,8 @@ export default {
         if (response && response.runtime) applyRemoteRuntime(response.runtime)
         if (response && response.capabilities) {
           self.homeAvailable = response.capabilities.home === true
-          self.homeLabel = self.homeAvailable ? "Дом" : "Дом · нет"
+          if (response.capabilities.speech === false) self.speechAvailable = false
+          else if (response.capabilities.speech === true) self.speechAvailable = true
         }
       }, function() {})
       // Кэш заметок нужен экрану заметок, но читаем его здесь: приложение
@@ -123,6 +149,7 @@ export default {
   // страницы. Счётчик — это setInterval: без этого он продолжал бы тикать
   // после ухода со страницы, удерживая замыкание на всю вьюмодель.
   onDestroy() {
+    this.voiceEpoch += 1
     this.stopTicker()
     if (this.undoTimer) {
       clearTimeout(this.undoTimer)
@@ -161,7 +188,6 @@ export default {
     if (!this.busy) return
     this.voiceEpoch += 1
     this.stopTicker()
-    if (this.recording) cancelRecording()
     this.recording = false
     this.setBusy(false)
     this.status = "готов"
@@ -210,27 +236,12 @@ export default {
   // что человек договорил, и он стоял перед экраном, ожидая непонятно чего.
   // Повторное нажатие тогда отменяло всё целиком — худшее из поведений.
   talk() {
-    if (!this.settingsReady || !getCached().gatewayUrl || !getCached().deviceToken) {
-      this.errorText = "Сначала настройте шлюз"
-      return
-    }
-    if (this.recording) {
-      this.finishRecording()
-      return
-    }
-    if (this.busy) {
-      this.unstick()
+    if (this.busy) { this.unstick(); return }
+    if (this.pendingCaptureUri) {
+      this.retryCapture()
       return
     }
     this.startVoice("")
-  },
-
-  finishRecording() {
-    this.recording = false
-    this.beginThinking()
-    // record.stop() завершает запись, и рантайм отдаёт файл в тот же
-    // success-колбэк, что и по истечении времени.
-    stopRecording()
   },
 
   // Видимое ожидание переносится легче молчаливого. Через телефон ответ идёт
@@ -265,62 +276,81 @@ export default {
   },
 
   startVoice(intent) {
+    if (!this.settingsReady || !getCached().gatewayUrl || !getCached().deviceToken) {
+      this.errorText = "Сначала настройте шлюз"
+      return
+    }
+    router.replace({ uri: "/pages/capture", params: { intent: intent || "" } })
+  },
+
+  consumeCapture() {
     var self = this
-    if (self.busy) return
-    var epoch = self.voiceEpoch + 1
-    self.voiceEpoch = epoch
-    self.recording = true
+    var uri = self.captureUri
+    if (!uri || uri === self.captureConsumed) return
+    self.captureConsumed = uri
+    self.captureUri = ""
+    self.recording = false
+    self.voiceEpoch += 1
+    self.pendingCaptureUri = uri
+    self.pendingCaptureContentType = self.captureContentType || "audio/opus"
+    self.pendingCaptureIntent = self.captureIntent || ""
+    self.pendingCaptureRecordedMs = Number(self.captureRecordedMs) || 0
+    self.sendCaptured()
+  },
+
+  retryCapture() {
+    if (!this.pendingCaptureUri || this.busy) return
+    this.sendCaptured()
+  },
+
+  sendCaptured() {
+    var self = this
+    var epoch = ++self.voiceEpoch
+    var uri = self.pendingCaptureUri
+    var contentType = self.pendingCaptureContentType || "audio/opus"
+    var intent = self.pendingCaptureIntent || ""
+    var recordedMs = self.pendingCaptureRecordedMs || 0
     self.setBusy(true)
+    self.beginThinking()
     self.errorText = ""
-    self.talkLabel = "Готово"
-    self.result = getRecordingSettings().autoStop ? "Говорите — закончу сам" : "Нажмите, когда договорите"
-    self.status = "говорите · " + Math.round(getRecordingSettings().maxRecordingMs / 1000)
-    self.startTicker("record")
-
-    recordAudio(function(audio) {
+    voiceUri(uri, self.captureContentType || contentType, intent, function(response) {
       if (epoch !== self.voiceEpoch) return
-      self.recording = false
-      self.beginThinking()
-
-      var send = audio.bytes ? voiceBytes : voiceUri
-      var source = audio.bytes || audio.uri
-      send(source, audio.contentType, intent, function(response) {
-        if (epoch !== self.voiceEpoch) return
-        self.stopTicker()
-        self.setBusy(false)
-        self.errorText = ""
-
-        if (response.kind === "home" && response.requiresConfirmation && response.confirmationToken) {
-          self.applyResponse(response)
-          self.askHomeConfirmation(response)
-          return
-        }
-        self.applyResponse(response)
-      }, function(error) {
-        if (epoch !== self.voiceEpoch) return
-        self.stopTicker()
-        self.setBusy(false)
-        self.status = "ошибка"
-        self.errorText = messageFrom(error)
-        self.updateTalkLabel()
-      }, { recordedMs: audio.recordedMs })
-    }, function(error) {
-      if (epoch !== self.voiceEpoch) return
-      self.recording = false
+      self.pendingCaptureUri = ""
+      self.pendingCaptureContentType = ""
+      self.pendingCaptureIntent = ""
+      self.pendingCaptureRecordedMs = 0
       self.stopTicker()
       self.setBusy(false)
-      self.status = "готов"
+      self.errorText = ""
+      sendVoiceReceipt("voice-response", {
+        ok: true, kind: response.kind || "", source: response.source || "",
+        requestId: response.requestId || "", timings: response.timings || null,
+        hasTranscript: !!response.transcript, hasText: !!response.text,
+        speechId: !!response.speechId
+      })
+      if (response.kind === "home" && response.requiresConfirmation && response.confirmationToken) {
+        self.applyResponse(response)
+        self.askHomeConfirmation(response)
+        return
+      }
+      self.applyResponse(response)
+    }, function(error) {
+      if (epoch !== self.voiceEpoch) return
+      self.stopTicker()
+      self.setBusy(false)
+      self.status = "ошибка"
       self.errorText = messageFrom(error)
-      self.updateTalkLabel()
-    })
+      self.talkLabel = "Повторить отправку"
+      sendVoiceReceipt("voice-error", {
+        ok: false, message: messageFrom(error), code: error && error.code || null,
+        requestId: error && error.requestId || ""
+      })
+    }, { recordedMs: recordedMs })
   },
 
   startHome() {
     if (this.busy) return
-    if (!this.homeAvailable) {
-      this.errorText = "Дом не настроен на шлюзе"
-      return
-    }
+    if (!this.homeAvailable) return
     this.startVoice("home")
   },
 
@@ -344,9 +374,13 @@ export default {
     this.setUndo(response.undoToken || "")
     this.updateTalkLabel()
     vibrator.vibrate({ mode: "short" })
-    if (this.speechId && getCached().speakAnswers) {
-      var self = this
-      speak(this.speechId, function() {}, function(error) { self.errorText = messageFrom(error) })
+    if (this.speechId && getCached().speakAnswers && this.speechAvailable) {
+      router.replace({ uri: "/pages/answer", params: {
+        text: this.result,
+        source: this.answerSource,
+        speechId: this.speechId,
+        autoSpeak: "1"
+      } })
     }
   },
 
