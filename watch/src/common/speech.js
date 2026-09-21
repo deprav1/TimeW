@@ -43,6 +43,7 @@ var lastPlayback = { started: false, error: "", volume: -1 }
 var speechReport = {
   transport: "request.download", headerShape: "string-json", tokenPresent: false,
   phase: "idle", code: null, attempts: 0, fallback: "",
+  response: { bytes: 0, contentType: "", truncated: false },
   // Куда ушло время внутри озвучки: запрос к шлюзу, разбор base64, запись
   // файла. Без разбивки «медленно» неотличимо от «медленный провайдер».
   timings: { fetchMs: 0, decodeMs: 0, writeMs: 0, bytes: 0 }
@@ -101,6 +102,7 @@ function freshReport(transport, headerShape, phase, tokenPresent) {
   return {
     transport: transport, headerShape: headerShape, tokenPresent: !!tokenPresent,
     phase: phase, code: null, attempts: 0, fallback: "",
+    response: { bytes: 0, contentType: "", truncated: false },
     timings: { fetchMs: 0, decodeMs: 0, writeMs: 0, bytes: 0 }
   }
 }
@@ -128,10 +130,11 @@ function speechFailure(code, phase, extra) {
 var PLAY_START_TIMEOUT_MS = 8000
 var PLAY_MAX_MS = 180000
 
-function play(uri, done, fail) {
+function play(uri, done, fail, onStarted) {
   var settled = false
   var started = false
   var timer = 0
+  var stateTimers = []
 
   function arm(ms, onTimeout) {
     if (timer) clearTimeout(timer)
@@ -143,6 +146,8 @@ function play(uri, done, fail) {
 
   function detach() {
     if (timer) { clearTimeout(timer); timer = 0 }
+    stateTimers.forEach(function(id) { clearTimeout(id) })
+    stateTimers = []
     audio.onended = null
     audio.onstop = null
     audio.onerror = null
@@ -176,6 +181,26 @@ function play(uri, done, fail) {
     if (started) return
     started = true
     lastPlayback.started = true
+    if (onStarted) onStarted()
+    // `onplay`/`onloadeddata` only prove that the JS API accepted the file.
+    // Sample the runtime state after the decoder has had time to advance; this
+    // separates an immediately-stopped/silent session from real progress.
+    function sampleState() {
+      if (!audio || typeof audio.getPlayState !== "function") return
+      try {
+        audio.getPlayState({
+          success: function(value) { lastPlayback.playState = value || null },
+          fail: function(error, code) {
+            lastPlayback.playStateError = (error && error.message) || String(code || "ошибка")
+          }
+        })
+      } catch (error) {
+        lastPlayback.playStateError = error.message || "ошибка"
+      }
+    }
+    sampleState()
+    stateTimers.push(setTimeout(sampleState, 250))
+    stateTimers.push(setTimeout(sampleState, 1000))
     arm(PLAY_MAX_MS, finishOk)
   }
 
@@ -183,8 +208,10 @@ function play(uri, done, fail) {
   lastPlayback = { started: false, error: "", volume: lastPlayback.volume }
   try {
     audio.onended = finishOk
-    // A stop is terminal for the UI too: the user explicitly asked to stop.
-    audio.onstop = finishOk
+    // Do not bind `stop` as an end-of-track event. On Watch S5 replacing
+    // `audio.src` can emit a late stop from the previous file; during
+    // double-buffer playback that would mark the next part as finished before
+    // it even starts. Explicit cancellation is handled by stopSpeaking().
     audio.onerror = function() { finishError({ message: "Часы не смогли проиграть ответ" }) }
     // Оба события означают «файл принят»: дальше ждать нечего, кроме конца.
     audio.onplay = markStarted
@@ -224,7 +251,8 @@ export function mediaVolume(done) {
 }
 
 export function lastPlaybackReport() {
-  return { started: lastPlayback.started, error: lastPlayback.error, volume: lastPlayback.volume }
+  return { started: lastPlayback.started, error: lastPlayback.error, volume: lastPlayback.volume,
+    playState: lastPlayback.playState || null, playStateError: lastPlayback.playStateError || "" }
 }
 
 export function lastSpeechReport() {
@@ -486,25 +514,31 @@ function decodeBase64(text) {
   var bytes = Math.floor(source.length / 4) * 3 - padding
   var out = new Uint8Array(bytes > 0 ? bytes : 0)
   var written = 0
-  var accumulator = 0
-  var bits = 0
-  for (var i = 0; i < source.length; i++) {
-    var code = source.charCodeAt(i)
-    var value = code < 128 ? table[code] : -1
-    if (value < 0) continue
-    accumulator = (accumulator << 6) | value
-    bits += 6
-    if (bits >= 8) {
-      bits -= 8
-      if (written < out.length) out[written++] = (accumulator >> bits) & 255
-    }
+  // Server base64 is compact and padded, so decode four characters at a
+  // time. The old bit-at-a-time loop took about two seconds for 64 KiB on the
+  // S5. This path performs a quarter as many loop iterations and allocations.
+  for (var i = 0; i + 3 < source.length; i += 4) {
+    var aCode = source.charCodeAt(i)
+    var bCode = source.charCodeAt(i + 1)
+    var cCode = source.charCodeAt(i + 2)
+    var dCode = source.charCodeAt(i + 3)
+    var a = aCode < 128 ? table[aCode] : -1
+    var b = bCode < 128 ? table[bCode] : -1
+    var c = cCode === 61 ? 0 : (cCode < 128 ? table[cCode] : -1)
+    var d = dCode === 61 ? 0 : (dCode < 128 ? table[dCode] : -1)
+    if (a < 0 || b < 0 || c < 0 || d < 0) throw new Error("invalid base64")
+    var value = (a << 18) | (b << 12) | (c << 6) | d
+    if (written < out.length) out[written++] = (value >> 16) & 255
+    if (written < out.length) out[written++] = (value >> 8) & 255
+    if (written < out.length) out[written++] = value & 255
   }
   return out.buffer
 }
 
-function bytesUrl(url) {
+function bytesUrl(url, part) {
   return url + (url.indexOf("?") >= 0 ? "&" : "?") +
-    "as=base64&rate=" + FALLBACK_RATE + "&bits=" + speechBits()
+    "as=base64&rate=" + FALLBACK_RATE + "&bits=" + speechBits() +
+    (typeof part === "number" ? "&part=" + part : "")
 }
 
 // Путь «ответ сразу файлом» (@system.fetch с responseType: "file") убран.
@@ -521,7 +555,7 @@ function bytesUrl(url) {
 // нового есть подтверждённое рабочее состояние на устройстве. У base64 оно
 // есть, у файла не было.
 
-function fetchAudioBytes(url, onUri, onFail) {
+function fetchAudioBytes(url, onUri, onFail, part, slot) {
   var epoch = speechEpoch
   var askedAt = Date.now()
   speechReport.fallback = "start"
@@ -533,12 +567,12 @@ function fetchAudioBytes(url, onUri, onFail) {
   if (token) headers["X-TimeW-Device-Token"] = token
   try {
     fetch.fetch({
-      url: bytesUrl(url),
+      url: bytesUrl(url, part),
       method: "GET",
       header: headers,
       success: settle(function(response) {
         if (!currentEpoch(epoch)) return
-        speechReport.timings.fetchMs = Date.now() - askedAt
+        speechReport.timings.fetchMs += Date.now() - askedAt
         var body
         try {
           var raw = response && (response.data || response.body || response)
@@ -553,6 +587,14 @@ function fetchAudioBytes(url, onUri, onFail) {
           onFail(speechFailure(null, "fallback-failed"))
           return
         }
+        speechReport.response = {
+          bytes: typeof body.totalBytes === "number" ? body.totalBytes :
+            (typeof body.bytes === "number" ? body.bytes : 0),
+          contentType: body.contentType || "",
+          truncated: body.truncated === true,
+          part: typeof body.part === "number" ? body.part : 0,
+          parts: typeof body.parts === "number" ? body.parts : 1
+        }
         if (body.audioBase64.length > MAX_BASE64_CHARS) {
           // Лучше честный отказ, чем убитое приложение: куча на часах
           // кончается раньше, чем терпение.
@@ -562,7 +604,7 @@ function fetchAudioBytes(url, onUri, onFail) {
         }
         var buffer
         var decodeStartedAt = Date.now()
-        speechReport.timings.bytes = body.bytes || 0
+        speechReport.timings.bytes += body.bytes || 0
         try {
           buffer = decodeBase64(body.audioBase64)
         } catch (decodeError) {
@@ -570,13 +612,14 @@ function fetchAudioBytes(url, onUri, onFail) {
           onFail(speechFailure(null, "fallback-failed"))
           return
         }
-        speechReport.timings.decodeMs = Date.now() - decodeStartedAt
+        speechReport.timings.decodeMs += Date.now() - decodeStartedAt
         // Строка больше не нужна, а весит столько же, сколько сам звук.
         // Отпускаем её до записи файла, чтобы пик в куче был один, а не два.
         body.audioBase64 = null
         body = null
         releaseMemory()
-        writeAudioFile(buffer, onUri, onFail)
+        var metadata = { part: speechReport.response.part, parts: speechReport.response.parts }
+        writeAudioFile(buffer, function(uri) { onUri(uri, metadata) }, onFail, slot)
       }),
       fail: settle(function(error, code) {
         if (!currentEpoch(epoch)) return
@@ -603,7 +646,7 @@ function releaseMemory() {
   }
 }
 
-function writeAudioFile(buffer, onUri, onFail) {
+function writeAudioFile(buffer, onUri, onFail, slot) {
   var epoch = speechEpoch
   if (!file || typeof file.writeArrayBuffer !== "function") {
     speechReport.fallback = "no-write"
@@ -613,7 +656,7 @@ function writeAudioFile(buffer, onUri, onFail) {
   // Имя одно на всё приложение: каждая озвучка перезаписывает предыдущую.
   // Нумерация копила бы файлы на часах до конца памяти — а чистить их
   // потом было бы нечем и некому.
-  var uri = "internal://files/timew/speech.wav"
+  var uri = "internal://files/timew/speech" + (typeof slot === "number" ? "-" + slot : "") + ".wav"
   var writeStartedAt = Date.now()
   var settle = guard(UPLOAD_TIMEOUT_MS, function() {
     speechReport.fallback = "write-timeout"
@@ -626,7 +669,7 @@ function writeAudioFile(buffer, onUri, onFail) {
         buffer: buffer,
         success: settle(function() {
           if (!currentEpoch(epoch)) return
-          speechReport.timings.writeMs = Date.now() - writeStartedAt
+          speechReport.timings.writeMs += Date.now() - writeStartedAt
           // Файл на диске, буфер в куче больше не нужен.
           buffer = null
           releaseMemory()
@@ -659,10 +702,83 @@ function writeAudioFile(buffer, onUri, onFail) {
   write()
 }
 
+// Long WAV responses are returned as independent chunks. Keep two files and
+// alternate them: while one is playing, the next chunk is fetched and written
+// to the other slot. This keeps the S5 memory ceiling and removes the old
+// four-second hard cutoff without introducing a pause between chunks.
+function playAudioParts(url, done, fail) {
+  var epoch = speechEpoch
+  var ready = {}
+  var loading = {}
+  var waiting = {}
+  var total = null
+  var failed = false
+
+  function reportFailure(error) {
+    if (failed || !currentEpoch(epoch)) return
+    failed = true
+    fail(error)
+  }
+
+  function load(part) {
+    if (failed || !currentEpoch(epoch) || loading[part] || ready[part] || (total !== null && part >= total)) return
+    loading[part] = true
+    fetchAudioBytes(url, function(uri, metadata) {
+      if (!currentEpoch(epoch) || failed) return
+      delete loading[part]
+      total = metadata.parts || total || 1
+      ready[part] = uri
+      if (waiting[part]) {
+        var continuePlaying = waiting[part]
+        delete waiting[part]
+        continuePlaying()
+      }
+    }, reportFailure, part, part % 2)
+  }
+
+  function playPart(part) {
+    if (failed || !currentEpoch(epoch)) return
+    if (!ready[part]) {
+      waiting[part] = function() { playPart(part) }
+      load(part)
+      return
+    }
+    var uri = ready[part]
+    delete ready[part]
+    play(uri, function() {
+      if (!currentEpoch(epoch) || failed) return
+      if (total !== null && part + 1 < total) {
+        playPart(part + 1)
+      } else {
+        done()
+      }
+    }, reportFailure, function() {
+      // Start the next transfer as soon as the decoder accepts this chunk.
+      if (total !== null && part + 1 < total) load(part + 1)
+    })
+  }
+
+  load(0)
+  playPart(0)
+}
+
 function download(speechId, done, fail) {
-  fetchAudio(speechUrl(speechId), function(uri) {
+  var url = speechUrl(speechId)
+  if (getRecordingSettings().speechTransport !== "download" || downloadUnusable) {
+    speechReport = freshReport("fetch-base64", "object", "bytes-first", !!getCached().deviceToken)
+    playAudioParts(url, done, fail)
+    return
+  }
+  fetchAudio(url, function(uri) {
     play(uri, done, fail)
   }, fail)
+}
+
+// Shared by diagnostics: play a file that is already on the watch without
+// involving the gateway. This isolates the speaker/decoder path from TTS and
+// network failures in the same run.
+export function playFile(uri, done, fail) {
+  play(uri, done, fail)
 }
 
 // Проверка динамика без траты запроса к модели: шлюз синтезирует свою
@@ -676,6 +792,20 @@ export function speakTest(done, fail) {
     lastPlayback = { started: false, error: "", volume: value }
     var url = baseUrl() + "/api/v1/speak/test?format=" +
       (getRecordingSettings().ttsFormat === "mp3" ? "mp3" : "wav")
+    var finish = function() {
+      done({ volume: value, uri: "internal://files/timew/speech.wav", downloadedMs: Date.now() - startedAt,
+        ms: Date.now() - startedAt, started: lastPlayback.started, speech: lastSpeechReport() })
+    }
+    var failed = function(error) {
+      fail({ message: (error && error.message) || "не проигралось", volume: value,
+        uri: "internal://files/timew/speech.wav", downloadedMs: Date.now() - startedAt,
+        ms: Date.now() - startedAt, speech: lastSpeechReport() })
+    }
+    if (getRecordingSettings().speechTransport !== "download" || downloadUnusable) {
+      speechReport = freshReport("fetch-base64", "object", "bytes-first", !!getCached().deviceToken)
+      playAudioParts(url, finish, failed)
+      return
+    }
     fetchAudio(url, function(uri) {
       var downloadedMs = Date.now() - startedAt
       play(uri, function() {

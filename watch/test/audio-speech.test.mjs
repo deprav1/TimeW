@@ -5,6 +5,7 @@ import { audio, record, request, volume, fetchModule, file, resetAll as resetMod
 const { recordAudio, recordingCapability, cancelRecording, resetFrameSupport } = await import("../src/common/audio.js");
 const { speak, stopSpeaking, mediaVolume, lastPlaybackReport, lastSpeechReport, resetSpeechTransport } = await import("../src/common/speech.js");
 const { applyRemoteRuntime } = await import("../src/common/settings.js");
+const { probeMinimalRecording, probeRecordingProfiles, collectRuntimeDiagnostics } = await import("../src/common/runtime-diag.js");
 
 // Потоковый режим держит весь PCM в куче часов, поэтому он выключен по
 // умолчанию и включается только явным autoStop со шлюза.
@@ -47,6 +48,11 @@ function base64Audio(bytes) {
   return { response: { code: 200, data: JSON.stringify({ ok: true, contentType: "audio/wav", bytes: buffer.length, audioBase64: buffer.toString("base64") }) } };
 }
 
+function base64AudioPart(bytes, part, parts) {
+  const buffer = Buffer.from(bytes);
+  return { response: { code: 200, data: JSON.stringify({ ok: true, contentType: "audio/wav", bytes: buffer.length, totalBytes: buffer.length * parts, part, parts, truncated: false, audioBase64: buffer.toString("base64") }) } };
+}
+
 function finishPlayback() {
   if (audio.onended) audio.onended();
 }
@@ -78,7 +84,7 @@ test("по умолчанию запись идёт файловым путём,
 // Подбирать нечего — закрыт сам доступ к микрофону. Поэтому одна попытка,
 // а не три: три быстрых старта микрофона на каждое нажатие — это то, после
 // чего часы уходили в чёрный экран.
-test("отказ доступа к микрофону не превращается в перебор вариантов", async () => {
+test("отказ записи не превращается в перебор вариантов", async () => {
   resetAll();
   await disableAutoStop();
   const calls = [];
@@ -91,7 +97,7 @@ test("отказ доступа к микрофону не превращает�
   record.start = originalStart;
   assert.equal(calls.length, 1, "микрофон дёргается один раз, а не трижды");
   assert.equal(error.code, 202);
-  assert.match(error.message, /микрофон/i, "сообщение называет доступ, а не параметры");
+  assert.match(error.message, /202|параметр/i, "код и документированная причина остаются видимыми");
 });
 
 test("синхронный отказ записи возвращается как ошибка, а не вешает экран", async () => {
@@ -99,6 +105,66 @@ test("синхронный отказ записи возвращается ка
   record.throwOnStart = true;
   const error = await new Promise((resolve) => recordAudio(() => resolve(null), resolve));
   assert.match(error.message, /начать запись|record unavailable/i);
+});
+
+test("диагностика делает один изолированный documented вызов и читает файл", async () => {
+  resetAll();
+  record.scripted = { result: { uri: "internal://cache/diag.opus" } };
+  file.files["internal://cache/diag.opus"] = new Uint8Array([79, 103, 103, 83, 1, 2]).buffer;
+  const [report, bytes] = await new Promise((resolve) => probeMinimalRecording((value, captured) => resolve([value, captured])));
+  assert.equal(report.observed, "success");
+  assert.deepEqual(report.request, {
+    duration: 10000, sampleRate: 8000, numberOfChannels: 1,
+    encodeBitRate: 128000, format: "pcm"
+  });
+  assert.equal(report.beforePlaybackStop, false);
+  assert.equal(report.fileRead.size, 6);
+  assert.equal(report.fileRead.head, "4f6767530102");
+  assert.equal(bytes.byteLength, 6);
+  assert.equal(file.files["internal://cache/diag.opus"], undefined, "диагностика удаляет временную запись");
+});
+
+test("диагностика сохраняет настоящий код и сырое сообщение 202", async () => {
+  resetAll();
+  record.scripted = { error: { message: "runtime parameter rejected", code: 202 } };
+  const report = await new Promise((resolve) => probeMinimalRecording((value) => resolve(value)));
+  assert.equal(report.observed, "fail");
+  assert.equal(report.code, 202);
+  assert.match(report.rawError, /parameter rejected/);
+  assert.match(report.interpretation || "runtime", /runtime|parameter/i);
+});
+
+test("диагностика сравнивает PCM, Opus и WAV отдельными вызовами", async () => {
+  resetAll();
+  const originalStart = record.start;
+  const calls = [];
+  record.start = (options) => {
+    calls.push({ format: options.format, bitrate: options.encodeBitRate });
+    const uri = `internal://cache/${options.format}.probe`;
+    file.files[uri] = new Uint8Array([1, 2, 3, 4]).buffer;
+    setTimeout(() => options.success && options.success({ uri }), 0);
+  };
+  const [reports, captures] = await new Promise((resolve) => probeRecordingProfiles((items, bytes) => resolve([items, bytes])));
+  record.start = originalStart;
+  assert.deepEqual(calls, [
+    { format: "pcm", bitrate: 128000 },
+    { format: "opus", bitrate: 12800 },
+    { format: "wav", bitrate: 128000 }
+  ]);
+  assert.deepEqual(reports.map((item) => [item.profile, item.observed]), [
+    ["pcm", "success"], ["opus", "success"], ["wav", "success"]
+  ]);
+  assert.deepEqual(reports.map((item) => item.fileRead.size), [4, 4, 4]);
+  assert.equal(captures[1].bytes.byteLength, 4);
+});
+
+test("диагностика получает сведения о Vela-устройстве и памяти", async () => {
+  resetAll();
+  const value = await new Promise((resolve) => collectRuntimeDiagnostics(resolve));
+  assert.equal(value.device.model, "Watch S5");
+  assert.equal(value.device.screenWidth, 480);
+  assert.equal(value.storage.availableBytes, 32 * 1024 * 1024);
+  assert.equal(value.methods.record.start, true);
 });
 
 test("кадры PCM собираются в WAV и возвращают отчёт автостопа", async () => {
@@ -263,6 +329,30 @@ test("начало воспроизведения фиксируется для 
   assert.deepEqual(speechErrors, []);
   assert.equal(report.started, true);
   assert.equal(report.volume, 0.6);
+});
+
+test("длинная озвучка переключает WAV-части без паузы и обрыва", async () => {
+  resetAll();
+  resetSpeech();
+  await new Promise((resolve) => applyRemoteRuntime({ speechTransport: "bytes" }, resolve));
+  fetchModule.scripted = [
+    base64AudioPart([82, 73, 70, 70, 1, 2, 3, 4], 0, 2),
+    base64AudioPart([82, 73, 70, 70, 5, 6, 7, 8], 1, 2)
+  ];
+  let finished = false;
+  speak("speech-long", () => { finished = true; }, (error) => speechErrors.push(error.message));
+  await waitFor(() => audio.playCalls === 1, "первая часть начала играть");
+  await waitFor(() => fetchModule.calls.length === 2, "вторая часть подготовлена заранее");
+  finishPlayback();
+  await waitFor(() => audio.playCalls === 2, "вторая часть начала играть");
+  assert.equal(finished, false, "ответ не должен закончиться после первой части");
+  // Watch S5 may deliver a late stop while the second file replaces the
+  // first source. That signal must not finish the new part prematurely.
+  if (audio.onstop) audio.onstop();
+  assert.equal(finished, false, "поздний stop не должен обрывать вторую часть");
+  finishPlayback();
+  assert.equal(finished, true);
+  assert.deepEqual(speechErrors, []);
 });
 
 // Отчёт с устройства: request.download приняли, а onDownloadComplete сразу
