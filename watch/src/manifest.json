@@ -2,7 +2,7 @@
   "package": "com.timew.personal",
   "name": "TimeW",
   "versionName": "0.3.0",
-  "versionCode": 65,
+  "versionCode": 87,
   "minPlatformVersion": 1000,
   "icon": "/common/icon.png",
   "deviceTypeList": [
@@ -44,6 +44,9 @@
     },
     {
       "name": "system.volume"
+    },
+    {
+      "name": "system.device"
     }
   ],
   "config": {
@@ -52,10 +55,7 @@
     "background": {
       "features": [
         "system.audio",
-        "system.request",
-        "system.fetch",
-        "system.record",
-        "system.uploadtask"
+        "system.request"
       ]
     }
   },
@@ -76,6 +76,9 @@
       },
       "pages/diag": {
         "component": "diag"
+      },
+      "pages/capture": {
+        "component": "capture"
       }
     }
   }
