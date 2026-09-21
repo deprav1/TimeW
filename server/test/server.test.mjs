@@ -1707,6 +1707,52 @@ test("bits=8 отдаёт вдвое меньший WAV и правит заго
   );
 });
 
+test("длинный WAV отдаётся всеми частями без обрезки и превышения лимита", async (t) => {
+  resetSpeechCache();
+  const originalFormat = config.ttsFormat;
+  config.ttsFormat = "mp3";
+  t.after(() => { config.ttsFormat = originalFormat; });
+  const pcm = Buffer.alloc(8000 * 2 * 10);
+  for (let i = 0; i < pcm.length / 2; i++) pcm.writeInt16LE(((i % 80) - 40) * 400, i * 2);
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0); header.writeUInt32LE(36 + pcm.length, 4); header.write("WAVE", 8);
+  header.write("fmt ", 12); header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22); header.writeUInt32LE(8000, 24); header.writeUInt32LE(16000, 28);
+  header.writeUInt16LE(2, 32); header.writeUInt16LE(16, 34); header.write("data", 36);
+  header.writeUInt32LE(pcm.length, 40);
+  const wav = Buffer.concat([header, pcm]);
+
+  await withMockOpenAI(
+    async (req, res) => {
+      res.writeHead(200, { "Content-Type": "audio/wav" });
+      res.end(wav);
+    },
+    async () => {
+      const payloads = [];
+      let expectedParts = 0;
+      for (let part = 0; expectedParts === 0 || part < expectedParts; part++) {
+        const response = await fetch(`${base}/api/v1/speak/test?format=wav&as=base64&part=${part}`);
+        assert.equal(response.status, 200);
+        const body = await response.json();
+        expectedParts = body.parts;
+        assert.equal(body.part, part);
+        assert.equal(body.truncated, false);
+        assert.equal(body.totalBytes, wav.length);
+        const chunk = Buffer.from(body.audioBase64, "base64");
+        assert.ok(chunk.length <= 64 * 1024);
+        assert.equal(chunk.toString("ascii", 0, 4), "RIFF");
+        assert.equal(chunk.readUInt32LE(40), chunk.length - 44);
+        payloads.push(chunk.subarray(44));
+      }
+      assert.ok(expectedParts > 1);
+      assert.equal(Buffer.compare(Buffer.concat(payloads), pcm), 0);
+
+      const missing = await fetch(`${base}/api/v1/speak/test?format=wav&as=base64&part=${expectedParts}`);
+      assert.equal(missing.status, 416);
+    }
+  );
+});
+
 test("GET /api/v1/speak/test says so plainly when synthesis is not configured", async () => {
   const res = await fetch(`${base}/api/v1/speak/test`);
   assert.equal(res.status, 503);

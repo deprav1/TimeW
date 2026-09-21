@@ -1730,6 +1730,42 @@ function sendAudioAs(req, res, speech) {
   const rate = Number(params.get("rate")) || 0;
   let audio = rate ? decimateWav(speech.audio, rate) : speech.audio;
   if (params.get("bits") === "8") audio = to8bit(audio);
+
+  // A Vela watch can safely hold one 64 KiB WAV in its JS heap, but a longer
+  // answer must not be silently cut at that boundary. When the caller opts
+  // into parts, return independent WAV chunks with fresh headers. The watch
+  // can play one chunk while fetching and decoding the next one, keeping the
+  // memory ceiling unchanged and preserving the complete answer.
+  if (params.has("part")) {
+    if (audio.length < 44 || audio.toString("ascii", 0, 4) !== "RIFF" ||
+        audio.toString("ascii", 8, 12) !== "WAVE") {
+      return error(res, 502, "Озвучка пришла не в формате WAV", "tts_format");
+    }
+    const requestedPart = Number(params.get("part"));
+    const step = audio.readUInt16LE(34) === 8 ? 1 : 2;
+    const maxData = Math.floor((SPEECH_BASE64_LIMIT - 44) / step) * step;
+    const data = audio.subarray(44);
+    const parts = Math.max(1, Math.ceil(data.length / maxData));
+    if (!Number.isInteger(requestedPart) || requestedPart < 0 || requestedPart >= parts) {
+      return error(res, 416, "Часть озвучки отсутствует", "tts_part_out_of_range");
+    }
+    const start = requestedPart * maxData;
+    const chunkData = data.subarray(start, Math.min(data.length, start + maxData));
+    const chunk = Buffer.concat([audio.subarray(0, 44), chunkData]);
+    chunk.writeUInt32LE(chunk.length - 8, 4);
+    chunk.writeUInt32LE(chunk.length - 44, 40);
+    return json(res, 200, {
+      ok: true,
+      contentType: speech.contentType,
+      bytes: chunk.length,
+      totalBytes: audio.length,
+      truncated: false,
+      part: requestedPart,
+      parts,
+      audioBase64: chunk.toString("base64")
+    });
+  }
+
   let truncated = false;
   if (audio.length > SPEECH_BASE64_LIMIT) {
     // Граница отсчёта зависит от разрядности: у восьмибитного звука каждый
